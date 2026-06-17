@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui = { package = "gpui-unofficial", version = "1.2.7" }
-gpui_platform = { package = "gpui-platform-gpui-unofficial", version = "1.2.7", features = [
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = [
     "font-kit",
     "runtime_shaders",
 ] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "341619c789e21b941b23c0fb2e535c74bdd4df33" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "341619c789e21b941b23c0fb2e535c74bdd4df33" }
 serde_json = "1"
-unicode-segmentation = "1"

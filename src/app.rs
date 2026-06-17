@@ -1,11 +1,15 @@
-use crate::actions::Send;
 use crate::bridge::{BridgeCommand, BridgeEvent, empty_chat, start_app_server_bridge};
-use crate::input::TextInput;
 use crate::models::{Chat, Message, Project, StreamState, ToolCall, ToolStatus};
 use crate::workspace::workspace_path;
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, Task, Window, div, prelude::*, px, rgb, rgba,
+    Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task,
+    Window, div, prelude::*, px, rgb,
+};
+use gpui_component::{
+    ActiveTheme as _, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    input::{Input, InputEvent, InputState},
+    v_flex,
 };
 use std::{
     sync::mpsc::{Receiver, Sender},
@@ -20,14 +24,29 @@ pub struct CodexGui {
     bridge_status: String,
     bridge_tx: Option<Sender<BridgeCommand>>,
     bridge_rx: Receiver<BridgeEvent>,
-    composer_input: Entity<TextInput>,
+    composer_input: Entity<InputState>,
     pending_turn_text: Option<String>,
     _bridge_task: Task<()>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl CodexGui {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (bridge_tx, bridge_rx) = start_app_server_bridge();
+        let composer_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .auto_grow(1, 5)
+                .submit_on_enter(true)
+                .placeholder("Ask Codex to change, explain, or inspect this project")
+        });
+        let subscriptions =
+            vec![
+                cx.subscribe_in(&composer_input, window, |view, _, event, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                        view.send_composer_turn(window, cx);
+                    }
+                }),
+            ];
         let bridge_task = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -54,9 +73,10 @@ impl CodexGui {
             bridge_status: "starting codex app-server".into(),
             bridge_tx: Some(bridge_tx),
             bridge_rx,
-            composer_input: cx.new(TextInput::new),
+            composer_input,
             pending_turn_text: None,
             _bridge_task: bridge_task,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -100,11 +120,11 @@ impl CodexGui {
         cx.notify();
     }
 
-    fn send_composer_turn(&mut self, cx: &mut Context<Self>) {
-        let text = self.composer_input.update(cx, |input, _cx| {
-            let text = input.content.trim().to_string();
+    fn send_composer_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer_input.update(cx, |input, cx| {
+            let text = input.value().trim().to_string();
             if !text.is_empty() {
-                input.reset();
+                input.set_value("", window, cx);
             }
             text
         });
@@ -349,9 +369,8 @@ impl Render for CodexGui {
 
         div()
             .size_full()
-            .on_action(cx.listener(|view, _: &Send, _window, cx| view.send_composer_turn(cx)))
-            .bg(rgb(0x111318))
-            .text_color(rgb(0xe7e9ee))
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .font_family(".SystemUIFont")
             .child(
                 div()
@@ -368,37 +387,32 @@ impl Render for CodexGui {
 
 impl CodexGui {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let project_items = self.projects.iter().enumerate().fold(
-            div().flex().flex_col().gap_1(),
-            |list, (index, project)| {
-                let selected = index == self.active_project;
-                list.child(
-                    button(project.name.clone())
-                        .id(format!("project-{index}"))
-                        .when(selected, |this| this.bg(rgb(0x2a2f3a)))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x8d95a5))
-                                .child(project.path.clone()),
-                        )
-                        .on_click(
-                            cx.listener(move |view, _, _, cx| view.select_project(index, cx)),
-                        ),
-                )
-            },
-        );
+        let project_items =
+            self.projects
+                .iter()
+                .enumerate()
+                .fold(v_flex().gap_1(), |list, (index, project)| {
+                    let selected = index == self.active_project;
+                    list.child(
+                        nav_item(format!("project-{index}"), project.name.clone(), selected)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x8d95a5))
+                                    .child(project.path.clone()),
+                            )
+                            .on_click(
+                                cx.listener(move |view, _, _, cx| view.select_project(index, cx)),
+                            ),
+                    )
+                });
 
         let chat_items = self.active_project().chats.iter().enumerate().fold(
-            div().flex().flex_col().gap_1(),
+            v_flex().gap_1(),
             |list, (index, chat)| {
                 let selected = index == self.active_chat;
                 list.child(
-                    button(chat.title.clone())
-                        .id(format!("chat-{index}"))
-                        .when(selected, |this| {
-                            this.bg(rgb(0x283344)).border_color(rgb(0x4f80ff))
-                        })
+                    nav_item(format!("chat-{index}"), chat.title.clone(), selected)
                         .child(
                             div()
                                 .text_xs()
@@ -416,8 +430,8 @@ impl CodexGui {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(0x252933))
-            .bg(rgb(0x171a21))
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
             .p_3()
             .gap_4()
             .child(section_label("Projects"))
@@ -430,18 +444,16 @@ impl CodexGui {
                     .flex()
                     .gap_2()
                     .child(
-                        command_button("New")
-                            .id("start-thread")
+                        command_button("start-thread", "New")
+                            .primary()
                             .on_click(cx.listener(|view, _, _, cx| view.start_thread(cx))),
                     )
                     .child(
-                        command_button("Fork")
-                            .id("fork-chat")
+                        command_button("fork-chat", "Fork")
                             .on_click(cx.listener(|view, _, _, cx| view.fork_chat(cx))),
                     )
                     .child(
-                        command_button("Side")
-                            .id("toggle-side-chat")
+                        command_button("toggle-side-chat", "Side")
                             .on_click(cx.listener(|view, _, _, cx| view.toggle_side_chat(cx))),
                     ),
             )
@@ -485,7 +497,7 @@ impl CodexGui {
             .h_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x101116))
+            .bg(cx.theme().background)
             .child(
                 div()
                     .h(px(58.))
@@ -493,7 +505,7 @@ impl CodexGui {
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(0x252933))
+                    .border_color(cx.theme().border)
                     .px_5()
                     .child(
                         div()
@@ -520,7 +532,7 @@ impl CodexGui {
             .child(composer(self.composer_input.clone(), cx))
     }
 
-    fn render_side_chat(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_side_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let thread = self
             .active_chat()
             .map(|chat| chat.title.clone())
@@ -533,7 +545,7 @@ impl CodexGui {
             .flex_col()
             .border_l_1()
             .border_color(rgb(0x252933))
-            .bg(rgb(0x151820))
+            .bg(cx.theme().sidebar)
             .child(
                 div()
                     .h(px(58.))
@@ -579,32 +591,17 @@ fn section_label(text: &'static str) -> impl IntoElement {
         .child(text.to_ascii_uppercase())
 }
 
-fn button(label: SharedString) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .w_full()
-        .p_2()
-        .rounded_sm()
-        .border_1()
-        .border_color(rgba(0xffffff0a))
-        .hover(|this| this.bg(rgb(0x20242d)))
-        .cursor_pointer()
-        .child(div().text_sm().child(label))
+fn nav_item(id: impl Into<gpui::ElementId>, label: SharedString, selected: bool) -> Button {
+    Button::new(id).ghost().selected(selected).w_full().child(
+        v_flex()
+            .items_start()
+            .gap_1()
+            .child(div().text_sm().child(label)),
+    )
 }
 
-fn command_button(label: &'static str) -> gpui::Div {
-    div()
-        .px_3()
-        .py_2()
-        .rounded_sm()
-        .bg(rgb(0x2563eb))
-        .hover(|this| this.bg(rgb(0x3472ff)))
-        .cursor_pointer()
-        .text_sm()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(label)
+fn command_button(id: &'static str, label: &'static str) -> Button {
+    Button::new(id).small().label(label)
 }
 
 fn status_pill(label: String) -> impl IntoElement {
@@ -618,29 +615,19 @@ fn status_pill(label: String) -> impl IntoElement {
         .child(label)
 }
 
-fn composer(input: Entity<TextInput>, cx: &mut Context<CodexGui>) -> impl IntoElement {
+fn composer(input: Entity<InputState>, cx: &mut Context<CodexGui>) -> impl IntoElement {
     div()
         .border_t_1()
-        .border_color(rgb(0x252933))
+        .border_color(cx.theme().border)
         .p_4()
         .flex()
         .items_end()
         .gap_3()
+        .child(Input::new(&input).h(px(112.)).flex_1())
         .child(
-            div()
-                .flex_1()
-                .min_h(px(50.))
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(0x343b49))
-                .bg(rgb(0x171b24))
-                .p_3()
-                .child(input),
-        )
-        .child(
-            command_button("Send")
-                .id("send-composer-turn")
-                .on_click(cx.listener(|view, _, _, cx| view.send_composer_turn(cx))),
+            command_button("send-composer-turn", "Send")
+                .primary()
+                .on_click(cx.listener(|view, _, window, cx| view.send_composer_turn(window, cx))),
         )
 }
 
