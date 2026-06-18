@@ -7,6 +7,9 @@ use gpui::{
 use gpui_component::{
     Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
+    clipboard::Clipboard,
+    h_flex,
+    text::markdown,
     theme::Theme,
     v_flex,
 };
@@ -116,8 +119,10 @@ fn render_message_view(
     )>,
 ) -> gpui::Div {
     match message {
-        Message::User(body) => message_block("You", body, theme, true),
-        Message::Commentary(body) => message_block("Commentary", body, theme, false),
+        Message::User(body) => message_block("You", body, theme, MessageBodyFormat::Plain),
+        Message::Commentary(body) => {
+            message_block("Commentary", body, theme, MessageBodyFormat::Markdown)
+        }
         Message::Assistant {
             body, state, tools, ..
         } => {
@@ -128,7 +133,7 @@ fn render_message_view(
                 },
                 body,
                 theme,
-                false,
+                MessageBodyFormat::Markdown,
             );
 
             if !hide_tools && !tools.is_empty() {
@@ -162,7 +167,35 @@ fn render_message_view(
     }
 }
 
-fn message_block(author: &'static str, body: &str, theme: &Theme, is_user: bool) -> gpui::Div {
+enum MessageBodyFormat {
+    Plain,
+    Markdown,
+}
+
+fn message_block(
+    author: &'static str,
+    body: &str,
+    theme: &Theme,
+    body_format: MessageBodyFormat,
+) -> gpui::Div {
+    let body = match body_format {
+        MessageBodyFormat::Plain => div()
+            .text_sm()
+            .line_height(px(22.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .whitespace_normal()
+            .child(body.to_string())
+            .into_any_element(),
+        MessageBodyFormat::Markdown => markdown(body.to_string())
+            .selectable(true)
+            .code_block_actions(|code_block, _, _| {
+                h_flex()
+                    .gap_1()
+                    .child(Clipboard::new("copy-code").value(code_block.code().clone()))
+            })
+            .into_any_element(),
+    };
+
     div()
         .w_full()
         .min_w_0()
@@ -183,15 +216,7 @@ fn message_block(author: &'static str, body: &str, theme: &Theme, is_user: bool)
                 .w_full()
                 .min_w_0()
                 .overflow_x_hidden()
-                .text_sm()
-                .line_height(px(22.))
-                .font_weight(if is_user {
-                    gpui::FontWeight::SEMIBOLD
-                } else {
-                    gpui::FontWeight::NORMAL
-                })
-                .whitespace_normal()
-                .child(body.to_string()),
+                .child(body),
         )
 }
 
