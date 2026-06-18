@@ -264,6 +264,10 @@ impl CodexGui {
                         .map(|thread| chat_entity_from_thread(thread, cx))
                         .collect::<Vec<_>>()
                 };
+                let default_thread_id = chats
+                    .first()
+                    .map(|chat| chat.read(cx).id.clone())
+                    .filter(|thread_id| thread_id != "empty");
                 if let Some(project) = self.active_project_entity(cx) {
                     project.update(cx, |project, cx| {
                         project.chats = chats;
@@ -275,6 +279,10 @@ impl CodexGui {
                     cx.notify();
                 });
                 self.set_bridge_status("connected to codex app-server", cx);
+                if let Some(thread_id) = default_thread_id {
+                    self.send_bridge(BridgeCommand::ResumeThread { thread_id }, cx);
+                    self.set_bridge_status("loading thread", cx);
+                }
             }
             BridgeEvent::ModelsLoaded(models) => {
                 self.state.update(cx, |state, cx| {
