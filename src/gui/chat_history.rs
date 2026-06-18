@@ -3,6 +3,7 @@ use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
     prelude::*,
 };
+use gpui_component::ActiveTheme as _;
 
 pub struct ChatHistory {
     state: Entity<GuiState>,
@@ -57,7 +58,9 @@ impl Render for ChatHistory {
                         .flex()
                         .flex_col()
                         .size_full()
+                        .min_w_0()
                         .gap_3()
+                        .overflow_x_hidden()
                         .overflow_y_scroll(),
                     |list, message| list.child(message),
                 )
@@ -68,18 +71,21 @@ impl Render for ChatHistory {
                     .flex()
                     .flex_col()
                     .size_full()
+                    .min_w_0()
                     .gap_3()
+                    .overflow_x_hidden()
                     .overflow_y_scroll()
-                    .child(render_message(&Message::Commentary(
-                        "Loading Codex threads from the app server.".into(),
-                    )))
+                    .child(render_message(
+                        &Message::Commentary("Loading Codex threads from the app server.".into()),
+                        cx.theme(),
+                    ))
             })
     }
 }
 
 impl Render for MessageState {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        render_message(&self.message)
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_message(&self.message, cx.theme())
     }
 }
 

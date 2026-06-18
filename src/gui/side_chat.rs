@@ -1,6 +1,6 @@
 use crate::gui::{GuiState, Message, widgets::render_message};
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, px, rgb,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -40,8 +40,9 @@ impl Render for SideChat {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(rgb(0x252933))
+            .border_color(cx.theme().sidebar_border)
             .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
             .child(
                 div()
                     .h(px(58.))
@@ -49,7 +50,7 @@ impl Render for SideChat {
                     .items_center()
                     .px_4()
                     .border_b_1()
-                    .border_color(rgb(0x252933))
+                    .border_color(cx.theme().sidebar_border)
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -67,15 +68,19 @@ impl Render for SideChat {
                         div()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(0x2f3542))
-                            .bg(rgb(0x1a1f29))
+                            .border_color(cx.theme().sidebar_border)
+                            .bg(cx.theme().sidebar_accent)
+                            .text_color(cx.theme().sidebar_accent_foreground)
                             .p_3()
                             .child(format!("Temporary view of {thread_title}.")),
                     )
-                    .child(render_message(&Message::Commentary(
-                        "Side chats remain a UI-only view until promoted through thread/fork."
-                            .into(),
-                    ))),
+                    .child(render_message(
+                        &Message::Commentary(
+                            "Side chats remain a UI-only view until promoted through thread/fork."
+                                .into(),
+                        ),
+                        cx.theme(),
+                    )),
             )
     }
 }

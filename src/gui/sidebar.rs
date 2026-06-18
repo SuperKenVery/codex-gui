@@ -85,7 +85,7 @@ impl Render for Sidebar {
                         (project.name.clone(), project.path.clone())
                     };
                     let selected = index == active_project;
-                    nav_item(format!("project-{index}"), name, path, selected)
+                    nav_item(format!("project-{index}"), name, path, selected, cx.theme())
                         .on_click(cx.listener(move |view, _, _, cx| view.select_project(index, cx)))
                 }));
 
@@ -101,9 +101,14 @@ impl Render for Sidebar {
                             (chat.title.clone(), chat.subtitle.clone())
                         };
                         let selected = index == active_chat;
-                        nav_item(format!("chat-{index}"), title, subtitle, selected).on_click(
-                            cx.listener(move |view, _, _, cx| view.select_chat(index, cx)),
+                        nav_item(
+                            format!("chat-{index}"),
+                            title,
+                            subtitle,
+                            selected,
+                            cx.theme(),
                         )
+                        .on_click(cx.listener(move |view, _, _, cx| view.select_chat(index, cx)))
                     }))
             })
             .unwrap_or_else(|| v_flex().gap_1());
@@ -116,6 +121,7 @@ impl Render for Sidebar {
             .border_r_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
             .p_3()
             .gap_3()
             .child(
@@ -127,9 +133,9 @@ impl Render for Sidebar {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(section_label("Projects"))
+                    .child(section_label("Projects", cx.theme()))
                     .child(project_items)
-                    .child(section_label("Codex Threads"))
+                    .child(section_label("Codex Threads", cx.theme()))
                     .child(chat_items),
             )
             .child(

@@ -5,7 +5,7 @@ use crate::gui::{
 };
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
-    div, prelude::*, px, rgb,
+    div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _,
@@ -115,6 +115,7 @@ impl Render for ChatPanel {
 
         div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .flex_col()
@@ -125,26 +126,43 @@ impl Render for ChatPanel {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_3()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .px_5()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .child(
                                 div()
+                                    .min_w_0()
                                     .text_lg()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .overflow_x_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
                                     .child(title),
                             )
-                            .child(div().text_xs().text_color(rgb(0x8f98a8)).child(subtitle)),
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .overflow_x_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(subtitle),
+                            ),
                     )
-                    .child(status_pill(bridge_status)),
+                    .child(status_pill(bridge_status, cx.theme())),
             )
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
                     .p_5()
