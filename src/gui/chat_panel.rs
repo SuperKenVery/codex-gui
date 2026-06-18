@@ -1,22 +1,27 @@
 use crate::app::CodexGui;
-use crate::gui::{ApprovalReviewerMode, BridgeState, ChatHistory, GuiState, widgets::status_pill};
+use crate::gui::{
+    ApprovalReviewerMode, BridgeState, ChatHistory, GuiState, UiState, widgets::status_pill,
+};
 use gpui::{
     Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
     WeakEntity, Window, WindowControlArea, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Side, Sizable as _,
+    ActiveTheme as _, IconName, Selectable as _, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::ScrollableElement,
 };
 
 pub struct ChatPanel {
     parent: WeakEntity<CodexGui>,
     state: Entity<GuiState>,
+    ui_state: Entity<UiState>,
     bridge_state: Entity<BridgeState>,
     history: Entity<ChatHistory>,
     composer_input: Entity<InputState>,
+    project_path_input: Entity<InputState>,
     should_move_window: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -25,6 +30,7 @@ impl ChatPanel {
     pub fn new(
         parent: WeakEntity<CodexGui>,
         state: Entity<GuiState>,
+        ui_state: Entity<UiState>,
         bridge_state: Entity<BridgeState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -34,14 +40,25 @@ impl ChatPanel {
             InputState::new(window, cx)
                 .auto_grow(1, 5)
                 .submit_on_enter(true)
-                .placeholder("Ask Codex to change, explain, or inspect this project")
+                .placeholder("Do anything")
+        });
+        let project_path_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .submit_on_enter(true)
+                .placeholder("/path/to/project")
         });
         let subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.observe(&ui_state, |_, _, cx| cx.notify()),
             cx.observe(&bridge_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&composer_input, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     view.send_composer_turn(window, cx);
+                }
+            }),
+            cx.subscribe_in(&project_path_input, window, |view, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                    view.add_project_from_input(window, cx);
                 }
             }),
         ];
@@ -49,9 +66,11 @@ impl ChatPanel {
         Self {
             parent,
             state,
+            ui_state,
             bridge_state,
             history,
             composer_input,
+            project_path_input,
             should_move_window: false,
             _subscriptions: subscriptions,
         }
@@ -88,7 +107,31 @@ impl ChatPanel {
         });
     }
 
-    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.select_project(index, cx));
+        });
+    }
+
+    fn add_project_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.project_path_input.update(cx, |input, cx| {
+            let path = input.value().trim().to_string();
+            if !path.is_empty() {
+                input.set_value("", window, cx);
+            }
+            path
+        });
+        if path.is_empty() {
+            return;
+        }
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.add_project(path, cx));
+        });
+    }
+
+    fn composer_surface(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (settings, models, permission_profiles) = {
             let state = self.state.read(cx);
             (
@@ -119,205 +162,305 @@ impl ChatPanel {
                 ]
             });
 
-        div().w_full().px_5().pb_5().flex().justify_center().child(
-            div()
-                .w_full()
-                .max_w(px(820.))
-                .rounded_3xl()
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
-                .shadow_sm()
-                .p_2()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    Input::new(&self.composer_input)
-                        .appearance(false)
-                        .h(px(92.))
-                        .w_full(),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Button::new("composer-model")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::Cpu)
-                                        .label(model_label)
-                                        .tooltip("Model settings")
-                                        .dropdown_menu({
-                                            let parent = self.parent.clone();
-                                            let models = models.clone();
-                                            let selected_model = settings.model.clone();
-                                            move |menu, _, _| {
-                                                let mut menu = menu
-                                                    .min_w(260.)
-                                                    .max_h(px(360.))
-                                                    .scrollable(true)
-                                                    .check_side(Side::Left);
-                                                if models.is_empty() {
-                                                    return menu.item(
-                                                        PopupMenuItem::new("Loading models")
-                                                            .disabled(true),
-                                                    );
-                                                }
-                                                for model in &models {
-                                                    let id = model.id.clone();
-                                                    let label = model.display_name.clone();
-                                                    let parent = parent.clone();
-                                                    menu = menu.item(
-                                                        PopupMenuItem::new(label)
-                                                            .checked(model.id == selected_model)
-                                                            .on_click(move |_, _, cx| {
-                                                                let id = id.clone();
-                                                                let _ = parent.update(
-                                                                    cx,
-                                                                    |parent, cx| {
-                                                                        parent.set_model(id, cx)
-                                                                    },
-                                                                );
-                                                            }),
-                                                    );
-                                                }
-                                                menu
+        div()
+            .w_full()
+            .max_w(px(820.))
+            .rounded_3xl()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_sm()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                Input::new(&self.composer_input)
+                    .appearance(false)
+                    .h(px(92.))
+                    .w_full(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("composer-model")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Cpu)
+                                    .label(model_label)
+                                    .tooltip("Model settings")
+                                    .dropdown_menu({
+                                        let parent = self.parent.clone();
+                                        let models = models.clone();
+                                        let selected_model = settings.model.clone();
+                                        move |menu, _, _| {
+                                            let mut menu = menu
+                                                .min_w(260.)
+                                                .max_h(px(360.))
+                                                .scrollable(true)
+                                                .check_side(Side::Left);
+                                            if models.is_empty() {
+                                                return menu.item(
+                                                    PopupMenuItem::new("Loading models")
+                                                        .disabled(true),
+                                                );
                                             }
-                                        }),
-                                )
-                                .child(
-                                    Button::new("composer-permissions")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::Check)
-                                        .label(settings.approvals_reviewer.label())
-                                        .tooltip("Permission settings")
-                                        .dropdown_menu({
-                                            let parent = self.parent.clone();
-                                            let settings = settings.clone();
-                                            let permission_profiles = permission_profiles.clone();
-                                            move |menu, _, _| {
-                                                let mut menu = menu
-                                                    .min_w(240.)
-                                                    .check_side(Side::Left)
-                                                    .item(PopupMenuItem::label("Permissions"));
-                                                for profile in &permission_profiles {
-                                                    let id = profile.id.clone();
-                                                    let parent = parent.clone();
-                                                    menu = menu.item(
-                                                        PopupMenuItem::new(profile.label.clone())
-                                                            .checked(
-                                                                settings.permission_profile
-                                                                    == profile.id,
-                                                            )
-                                                            .on_click(move |_, _, cx| {
-                                                                let id = id.clone();
-                                                                let _ = parent.update(
-                                                                    cx,
-                                                                    |parent, cx| {
-                                                                        parent
-                                                                            .set_permission_profile(
-                                                                                id, cx,
-                                                                            )
-                                                                    },
-                                                                );
-                                                            }),
-                                                    );
-                                                }
-                                                menu = menu
-                                                    .separator()
-                                                    .item(PopupMenuItem::label("Approvals"));
-                                                for reviewer in [
-                                                    ApprovalReviewerMode::User,
-                                                    ApprovalReviewerMode::AutoReview,
-                                                ] {
-                                                    let parent = parent.clone();
-                                                    menu = menu.item(
-                                                        PopupMenuItem::new(reviewer.label())
-                                                            .checked(
-                                                                settings.approvals_reviewer
-                                                                    == reviewer,
-                                                            )
-                                                            .on_click(move |_, _, cx| {
-                                                                let _ = parent.update(
-                                                                    cx,
-                                                                    |parent, cx| {
-                                                                        parent
-                                                                            .set_approvals_reviewer(
-                                                                                reviewer, cx,
-                                                                            )
-                                                                    },
-                                                                );
-                                                            }),
-                                                    );
-                                                }
-                                                menu
+                                            for model in &models {
+                                                let id = model.id.clone();
+                                                let label = model.display_name.clone();
+                                                let parent = parent.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(label)
+                                                        .checked(model.id == selected_model)
+                                                        .on_click(move |_, _, cx| {
+                                                            let id = id.clone();
+                                                            let _ =
+                                                                parent.update(cx, |parent, cx| {
+                                                                    parent.set_model(id, cx)
+                                                                });
+                                                        }),
+                                                );
                                             }
-                                        }),
-                                )
-                                .child(
-                                    Button::new("composer-effort")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::LoaderCircle)
-                                        .label(format!("Effort {}", title_case(&settings.effort)))
-                                        .tooltip("Thinking effort settings")
-                                        .dropdown_menu({
-                                            let parent = self.parent.clone();
-                                            let selected_effort = settings.effort.clone();
-                                            move |menu, _, _| {
-                                                let mut menu =
-                                                    menu.min_w(190.).check_side(Side::Left);
-                                                for effort in &effort_options {
-                                                    let value = effort.clone();
-                                                    let parent = parent.clone();
-                                                    menu = menu.item(
-                                                        PopupMenuItem::new(title_case(effort))
-                                                            .checked(*effort == selected_effort)
-                                                            .on_click(move |_, _, cx| {
-                                                                let value = value.clone();
-                                                                let _ = parent.update(
-                                                                    cx,
-                                                                    |parent, cx| {
-                                                                        parent.set_effort(value, cx)
-                                                                    },
-                                                                );
-                                                            }),
-                                                    );
-                                                }
-                                                menu
+                                            menu
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("composer-permissions")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Check)
+                                    .label(settings.approvals_reviewer.label())
+                                    .tooltip("Permission settings")
+                                    .dropdown_menu({
+                                        let parent = self.parent.clone();
+                                        let settings = settings.clone();
+                                        let permission_profiles = permission_profiles.clone();
+                                        move |menu, _, _| {
+                                            let mut menu = menu
+                                                .min_w(240.)
+                                                .check_side(Side::Left)
+                                                .item(PopupMenuItem::label("Permissions"));
+                                            for profile in &permission_profiles {
+                                                let id = profile.id.clone();
+                                                let parent = parent.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(profile.label.clone())
+                                                        .checked(
+                                                            settings.permission_profile
+                                                                == profile.id,
+                                                        )
+                                                        .on_click(move |_, _, cx| {
+                                                            let id = id.clone();
+                                                            let _ =
+                                                                parent.update(cx, |parent, cx| {
+                                                                    parent.set_permission_profile(
+                                                                        id, cx,
+                                                                    )
+                                                                });
+                                                        }),
+                                                );
                                             }
-                                        }),
-                                ),
-                        )
-                        .child(
-                            Button::new("send-composer-turn")
-                                .small()
-                                .primary()
-                                .rounded(px(999.))
-                                .icon(IconName::ArrowUp)
-                                .tooltip("Send")
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.send_composer_turn(window, cx)
-                                })),
-                        ),
-                ),
-        )
+                                            menu = menu
+                                                .separator()
+                                                .item(PopupMenuItem::label("Approvals"));
+                                            for reviewer in [
+                                                ApprovalReviewerMode::User,
+                                                ApprovalReviewerMode::AutoReview,
+                                            ] {
+                                                let parent = parent.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(reviewer.label())
+                                                        .checked(
+                                                            settings.approvals_reviewer == reviewer,
+                                                        )
+                                                        .on_click(move |_, _, cx| {
+                                                            let _ =
+                                                                parent.update(cx, |parent, cx| {
+                                                                    parent.set_approvals_reviewer(
+                                                                        reviewer, cx,
+                                                                    )
+                                                                });
+                                                        }),
+                                                );
+                                            }
+                                            menu
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("composer-effort")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::LoaderCircle)
+                                    .label(format!("Effort {}", title_case(&settings.effort)))
+                                    .tooltip("Thinking effort settings")
+                                    .dropdown_menu({
+                                        let parent = self.parent.clone();
+                                        let selected_effort = settings.effort.clone();
+                                        move |menu, _, _| {
+                                            let mut menu = menu.min_w(190.).check_side(Side::Left);
+                                            for effort in &effort_options {
+                                                let value = effort.clone();
+                                                let parent = parent.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(title_case(effort))
+                                                        .checked(*effort == selected_effort)
+                                                        .on_click(move |_, _, cx| {
+                                                            let value = value.clone();
+                                                            let _ =
+                                                                parent.update(cx, |parent, cx| {
+                                                                    parent.set_effort(value, cx)
+                                                                });
+                                                        }),
+                                                );
+                                            }
+                                            menu
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(
+                        Button::new("send-composer-turn")
+                            .small()
+                            .primary()
+                            .rounded(px(999.))
+                            .icon(IconName::ArrowUp)
+                            .tooltip("Send")
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.send_composer_turn(window, cx)
+                            })),
+                    ),
+            )
+    }
+
+    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w_full()
+            .px_5()
+            .pb_5()
+            .flex()
+            .justify_center()
+            .child(self.composer_surface(cx))
+    }
+
+    fn new_chat_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (projects, active_project, active_project_name) = {
+            let state = self.state.read(cx);
+            let active_project_name = state
+                .active_project()
+                .map(|project| project.read(cx).name.to_string())
+                .unwrap_or_else(|| "this project".into());
+            (
+                state.projects.clone(),
+                state.active_project,
+                active_project_name,
+            )
+        };
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px_5()
+            .pb_20()
+            .gap_7()
+            .child(
+                div()
+                    .max_w(px(820.))
+                    .w_full()
+                    .text_center()
+                    .text_3xl()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(format!("What should we build in {active_project_name}?")),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(820.))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(self.composer_surface(cx))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .overflow_x_scrollbar()
+                            .children(projects.iter().enumerate().map(|(index, project)| {
+                                let project = project.read(cx);
+                                Button::new(format!("new-chat-project-{index}"))
+                                    .small()
+                                    .ghost()
+                                    .selected(index == active_project)
+                                    .icon(if index == active_project {
+                                        IconName::FolderOpen
+                                    } else {
+                                        IconName::Folder
+                                    })
+                                    .label(project.name.clone())
+                                    .tooltip(project.path.clone())
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.select_project(index, cx)
+                                    }))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .child(
+                                        Input::new(&self.project_path_input)
+                                            .appearance(false)
+                                            .h(px(34.))
+                                            .w_full(),
+                                    ),
+                            )
+                            .child(
+                                Button::new("add-project")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Plus)
+                                    .label("Add project")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.add_project_from_input(window, cx)
+                                    })),
+                            ),
+                    ),
+            )
     }
 }
 
 impl Render for ChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let new_chat_open =
+            self.state.read(cx).active_project().is_some() && self.ui_state.read(cx).new_chat_open;
         let (title, subtitle, bridge_status) = {
             let (project, active_chat) = {
                 let state = self.state.read(cx);
@@ -441,23 +584,26 @@ impl Render for ChatPanel {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .px_5()
-                    .py_4()
-                    .child(
-                        div()
-                            .size_full()
-                            .max_w(px(820.))
-                            .mx_auto()
-                            .child(self.history.clone()),
-                    ),
-            )
-            .child(self.composer(cx))
+            .when(new_chat_open, |this| this.child(self.new_chat_page(cx)))
+            .when(!new_chat_open, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .px_5()
+                        .py_4()
+                        .child(
+                            div()
+                                .size_full()
+                                .max_w(px(820.))
+                                .mx_auto()
+                                .child(self.history.clone()),
+                        ),
+                )
+                .child(self.composer(cx))
+            })
     }
 }
 

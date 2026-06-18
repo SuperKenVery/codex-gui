@@ -46,10 +46,10 @@ impl Sidebar {
         });
     }
 
-    fn start_thread(&mut self, cx: &mut Context<Self>) {
+    fn open_new_chat(&mut self, cx: &mut Context<Self>) {
         let parent = self.parent.clone();
         cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.start_thread(cx));
+            let _ = parent.update(cx, |parent, cx| parent.open_new_chat(cx));
         });
     }
 }
@@ -186,7 +186,7 @@ impl Render for Sidebar {
                     .items_center(),
             )
             .child(
-                Button::new("start-thread")
+                Button::new("new-chat")
                     .ghost()
                     .w_full()
                     .with_size(px(0.))
@@ -200,7 +200,7 @@ impl Render for Sidebar {
                             .child(Icon::new(IconName::Plus).small())
                             .child(div().text_sm().child("New chat")),
                     )
-                    .on_click(cx.listener(|view, _, _, cx| view.start_thread(cx))),
+                    .on_click(cx.listener(|view, _, _, cx| view.open_new_chat(cx))),
             )
             .child(
                 div()

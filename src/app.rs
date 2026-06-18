@@ -14,6 +14,7 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 use std::{
+    path::Path,
     sync::mpsc::{Receiver, Sender},
     time::Duration,
 };
@@ -46,6 +47,7 @@ impl CodexGui {
             ChatPanel::new(
                 parent.clone(),
                 state.clone(),
+                ui_state.clone(),
                 bridge_state.clone(),
                 window,
                 cx,
@@ -83,11 +85,72 @@ impl CodexGui {
     }
 
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
+        let cwd = self
+            .state
+            .read(cx)
+            .projects
+            .get(index)
+            .map(|project| project.read(cx).path.to_string());
+        let should_load_threads = self
+            .state
+            .read(cx)
+            .projects
+            .get(index)
+            .map(|project| !project.read(cx).threads_loaded)
+            .unwrap_or(false);
         self.state.update(cx, |state, cx| {
             state.active_project = index;
             state.active_chat = 0;
             cx.notify();
         });
+        if should_load_threads {
+            if let Some(cwd) = cwd {
+                self.send_bridge(BridgeCommand::ListThreads { cwd }, cx);
+                self.set_bridge_status("loading project threads", cx);
+            }
+        }
+    }
+
+    pub(crate) fn open_new_chat(&mut self, cx: &mut Context<Self>) {
+        self.ui_state.update(cx, |state, cx| {
+            state.new_chat_open = true;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn add_project(&mut self, path: String, cx: &mut Context<Self>) {
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+
+        let existing_index = self
+            .state
+            .read(cx)
+            .projects
+            .iter()
+            .position(|project| project.read(cx).path.as_ref() == path);
+        if let Some(index) = existing_index {
+            self.select_project(index, cx);
+            self.open_new_chat(cx);
+            return;
+        }
+
+        let name = project_name_from_path(path);
+        let project = cx.new(|_| ProjectState::new(name.into(), path.into(), Vec::new()));
+        let index = self.state.update(cx, |state, cx| {
+            state.projects.push(project);
+            state.active_project = state.projects.len() - 1;
+            state.active_chat = 0;
+            cx.notify();
+            state.active_project
+        });
+        self.ui_state.update(cx, |state, cx| {
+            state.new_chat_open = true;
+            cx.notify();
+        });
+        self.select_project(index, cx);
     }
 
     pub(crate) fn select_chat(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -100,6 +163,10 @@ impl CodexGui {
         });
         self.state.update(cx, |state, cx| {
             state.active_chat = index;
+            cx.notify();
+        });
+        self.ui_state.update(cx, |state, cx| {
+            state.new_chat_open = false;
             cx.notify();
         });
         if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
@@ -121,13 +188,11 @@ impl CodexGui {
 
     pub(crate) fn start_thread(&mut self, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).chat_settings.clone();
-        self.send_bridge(
-            BridgeCommand::StartThread {
-                cwd: workspace_path(),
-                settings,
-            },
-            cx,
-        );
+        let cwd = self
+            .active_project_entity(cx)
+            .map(|project| project.read(cx).path.to_string())
+            .unwrap_or_else(workspace_path);
+        self.send_bridge(BridgeCommand::StartThread { cwd, settings }, cx);
         self.set_bridge_status("starting thread", cx);
     }
 
@@ -255,7 +320,7 @@ impl CodexGui {
     fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
         match event {
             BridgeEvent::Status(status) => self.set_bridge_status(status, cx),
-            BridgeEvent::ThreadsLoaded(threads) => {
+            BridgeEvent::ThreadsLoaded { cwd, threads } => {
                 let chats = if threads.is_empty() {
                     vec![empty_chat_entity(cx)]
                 } else {
@@ -268,20 +333,34 @@ impl CodexGui {
                     .first()
                     .map(|chat| chat.read(cx).id.clone())
                     .filter(|thread_id| thread_id != "empty");
-                if let Some(project) = self.active_project_entity(cx) {
+                let project_index = self
+                    .state
+                    .read(cx)
+                    .projects
+                    .iter()
+                    .position(|project| project.read(cx).path.as_ref() == cwd);
+                if let Some(project_index) = project_index {
+                    let project = self.state.read(cx).projects[project_index].clone();
                     project.update(cx, |project, cx| {
                         project.chats = chats;
+                        project.threads_loaded = true;
                         cx.notify();
                     });
+                    if project_index == self.state.read(cx).active_project {
+                        self.state.update(cx, |state, cx| {
+                            state.active_chat = 0;
+                            cx.notify();
+                        });
+                    }
                 }
-                self.state.update(cx, |state, cx| {
-                    state.active_chat = 0;
-                    cx.notify();
-                });
                 self.set_bridge_status("connected to codex app-server", cx);
-                if let Some(thread_id) = default_thread_id {
-                    self.send_bridge(BridgeCommand::ResumeThread { thread_id }, cx);
-                    self.set_bridge_status("loading thread", cx);
+                let can_resume_default = !self.ui_state.read(cx).new_chat_open
+                    && project_index == Some(self.state.read(cx).active_project);
+                if can_resume_default {
+                    if let Some(thread_id) = default_thread_id {
+                        self.send_bridge(BridgeCommand::ResumeThread { thread_id }, cx);
+                        self.set_bridge_status("loading thread", cx);
+                    }
                 }
             }
             BridgeEvent::ModelsLoaded(models) => {
@@ -314,6 +393,10 @@ impl CodexGui {
                 }
                 self.state.update(cx, |state, cx| {
                     state.active_chat = 0;
+                    cx.notify();
+                });
+                self.ui_state.update(cx, |state, cx| {
+                    state.new_chat_open = false;
                     cx.notify();
                 });
                 self.set_bridge_status("thread ready", cx);
@@ -775,6 +858,15 @@ fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
             })],
         )
     })
+}
+
+fn project_name_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn append_thread_item(

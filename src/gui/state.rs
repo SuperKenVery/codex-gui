@@ -130,11 +130,17 @@ pub struct ProjectState {
     pub name: SharedString,
     pub path: SharedString,
     pub chats: Vec<Entity<ChatState>>,
+    pub threads_loaded: bool,
 }
 
 impl ProjectState {
     pub fn new(name: SharedString, path: SharedString, chats: Vec<Entity<ChatState>>) -> Self {
-        Self { name, path, chats }
+        Self {
+            name,
+            path,
+            chats,
+            threads_loaded: false,
+        }
     }
 }
 
@@ -235,12 +241,14 @@ impl BridgeState {
 
 pub struct UiState {
     pub side_chat_open: bool,
+    pub new_chat_open: bool,
 }
 
 impl UiState {
     pub fn new() -> Self {
         Self {
             side_chat_open: false,
+            new_chat_open: true,
         }
     }
 }

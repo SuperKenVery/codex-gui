@@ -25,6 +25,9 @@ use std::{
 };
 
 pub enum BridgeCommand {
+    ListThreads {
+        cwd: String,
+    },
     StartThread {
         cwd: String,
         settings: ChatSettings,
@@ -48,7 +51,10 @@ pub enum BridgeCommand {
 
 pub enum BridgeEvent {
     Status(String),
-    ThreadsLoaded(Vec<Thread>),
+    ThreadsLoaded {
+        cwd: String,
+        threads: Vec<Thread>,
+    },
     ModelsLoaded(Vec<ModelOption>),
     PermissionProfilesLoaded(Vec<PermissionProfileOption>),
     ThreadStarted(Thread),
@@ -186,24 +192,9 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
         )));
     }
 
-    if let Err(err) = send_request(
-        "thread/list",
-        ThreadListParams {
-            cursor: None,
-            limit: Some(30),
-            sort_key: None,
-            sort_direction: None,
-            model_providers: None,
-            source_kinds: None,
-            archived: Some(false),
-            cwd: Some(ThreadListCwdFilter::One(workspace_path())),
-            use_state_db_only: false,
-            search_term: None,
-        },
-        &mut requests,
-        &mut next_id,
-        &mut stdin,
-    ) {
+    if let Err(err) =
+        send_thread_list_request(workspace_path(), &mut requests, &mut next_id, &mut stdin)
+    {
         let _ = event_tx.send(BridgeEvent::Error(format!(
             "Failed to list codex threads: {err}"
         )));
@@ -219,6 +210,9 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
     loop {
         while let Ok(command) = command_rx.try_recv() {
             let result = match command {
+                BridgeCommand::ListThreads { cwd } => {
+                    send_thread_list_request(cwd, &mut requests, &mut next_id, &mut stdin)
+                }
                 BridgeCommand::StartThread { cwd, settings } => send_request(
                     "thread/start",
                     ThreadStartParams {
@@ -364,6 +358,40 @@ fn send_request<P: Serialize>(
     stdin.flush()
 }
 
+fn send_thread_list_request(
+    cwd: String,
+    requests: &mut PendingRequests,
+    next_id: &mut i64,
+    stdin: &mut impl Write,
+) -> std::io::Result<()> {
+    let method = format!("thread/list:{cwd}");
+    let id = *next_id;
+    *next_id += 1;
+    requests.insert(id, method);
+    let params = serde_json::to_value(ThreadListParams {
+        cursor: None,
+        limit: Some(30),
+        sort_key: None,
+        sort_direction: None,
+        model_providers: None,
+        source_kinds: None,
+        archived: Some(false),
+        cwd: Some(ThreadListCwdFilter::One(cwd)),
+        use_state_db_only: false,
+        search_term: None,
+    })
+    .map_err(std::io::Error::other)?;
+    let request = JSONRPCRequest {
+        id: RequestId::Integer(id),
+        method: "thread/list".into(),
+        params: Some(params),
+        trace: None,
+    };
+    let request = serde_json::to_string(&request).map_err(std::io::Error::other)?;
+    writeln!(stdin, "{request}")?;
+    stdin.flush()
+}
+
 fn handle_server_line(line: &str, event_tx: &Sender<BridgeEvent>, requests: &mut PendingRequests) {
     let parsed: JSONRPCMessage = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -397,11 +425,15 @@ fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<Br
             let user_agent = result.user_agent;
             let _ = event_tx.send(BridgeEvent::Status(format!("connected: {user_agent}")));
         }
-        "thread/list" => {
+        method if method.starts_with("thread/list:") => {
             let Ok(result) = decode_result::<ThreadListResponse>(response.result, event_tx) else {
                 return;
             };
-            let _ = event_tx.send(BridgeEvent::ThreadsLoaded(result.data));
+            let cwd = method.trim_start_matches("thread/list:").to_string();
+            let _ = event_tx.send(BridgeEvent::ThreadsLoaded {
+                cwd,
+                threads: result.data,
+            });
         }
         "model/list" => {
             let Ok(result) = decode_result::<ModelListResponse>(response.result, event_tx) else {
