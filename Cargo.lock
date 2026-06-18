@@ -1398,6 +1398,7 @@ name = "codex-gui"
 version = "0.1.0"
 dependencies = [
  "codex-app-server-protocol",
+ "codex-protocol",
  "gpui",
  "gpui-component",
  "gpui-component-assets",

@@ -10,6 +10,7 @@ pub use chat_panel::ChatPanel;
 pub use side_chat::SideChat;
 pub use sidebar::Sidebar;
 pub use state::{
-    BridgeState, ChatState, GuiState, Message, MessageState, ProjectState, StreamState, ToolCall,
-    ToolStatus, UiState,
+    ApprovalReviewerMode, BridgeState, ChatSettings, ChatState, GuiState, Message, MessageState,
+    ModelOption, PermissionMode, PermissionProfileOption, ProjectState, StreamState, ToolCall,
+    ToolStatus, UiState, permission_profile_label,
 };

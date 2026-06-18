@@ -1,13 +1,14 @@
 use crate::app::CodexGui;
-use crate::gui::{BridgeState, ChatHistory, GuiState, widgets::status_pill};
+use crate::gui::{ApprovalReviewerMode, BridgeState, ChatHistory, GuiState, widgets::status_pill};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
     div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Sizable as _,
+    ActiveTheme as _, IconName, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
+    menu::{DropdownMenu as _, PopupMenuItem},
 };
 
 pub struct ChatPanel {
@@ -86,11 +87,41 @@ impl ChatPanel {
     }
 
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (settings, models, permission_profiles) = {
+            let state = self.state.read(cx);
+            (
+                state.chat_settings.clone(),
+                state.available_models.clone(),
+                state.permission_profiles.clone(),
+            )
+        };
+        let model_label =
+            if let Some(model) = models.iter().find(|model| model.id == settings.model) {
+                model.display_name.clone()
+            } else {
+                settings.model.clone()
+            };
+        let effort_options = models
+            .iter()
+            .find(|model| model.id == settings.model)
+            .map(|model| model.supported_efforts.clone())
+            .filter(|efforts| !efforts.is_empty())
+            .unwrap_or_else(|| {
+                vec![
+                    "none".into(),
+                    "minimal".into(),
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                ]
+            });
+
         div().w_full().px_5().pb_5().flex().justify_center().child(
             div()
                 .w_full()
                 .max_w(px(820.))
-                .rounded_lg()
+                .rounded_3xl()
                 .border_1()
                 .border_color(cx.theme().border)
                 .bg(cx.theme().background)
@@ -117,27 +148,153 @@ impl ChatPanel {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    Button::new("composer-attach")
+                                    Button::new("composer-model")
                                         .small()
                                         .ghost()
-                                        .icon(IconName::Plus)
-                                        .tooltip("Add context"),
+                                        .icon(IconName::Cpu)
+                                        .label(model_label)
+                                        .tooltip("Model settings")
+                                        .dropdown_menu({
+                                            let parent = self.parent.clone();
+                                            let models = models.clone();
+                                            let selected_model = settings.model.clone();
+                                            move |menu, _, _| {
+                                                let mut menu = menu
+                                                    .min_w(260.)
+                                                    .max_h(px(360.))
+                                                    .scrollable(true)
+                                                    .check_side(Side::Left);
+                                                if models.is_empty() {
+                                                    return menu.item(
+                                                        PopupMenuItem::new("Loading models")
+                                                            .disabled(true),
+                                                    );
+                                                }
+                                                for model in &models {
+                                                    let id = model.id.clone();
+                                                    let label = model.display_name.clone();
+                                                    let parent = parent.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(label)
+                                                            .checked(model.id == selected_model)
+                                                            .on_click(move |_, _, cx| {
+                                                                let id = id.clone();
+                                                                let _ = parent.update(
+                                                                    cx,
+                                                                    |parent, cx| {
+                                                                        parent.set_model(id, cx)
+                                                                    },
+                                                                );
+                                                            }),
+                                                    );
+                                                }
+                                                menu
+                                            }
+                                        }),
                                 )
                                 .child(
                                     Button::new("composer-permissions")
                                         .small()
                                         .ghost()
                                         .icon(IconName::Check)
-                                        .label("Approve for me")
-                                        .tooltip("Permission settings"),
+                                        .label(settings.approvals_reviewer.label())
+                                        .tooltip("Permission settings")
+                                        .dropdown_menu({
+                                            let parent = self.parent.clone();
+                                            let settings = settings.clone();
+                                            let permission_profiles = permission_profiles.clone();
+                                            move |menu, _, _| {
+                                                let mut menu = menu
+                                                    .min_w(240.)
+                                                    .check_side(Side::Left)
+                                                    .item(PopupMenuItem::label("Permissions"));
+                                                for profile in &permission_profiles {
+                                                    let id = profile.id.clone();
+                                                    let parent = parent.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(profile.label.clone())
+                                                            .checked(
+                                                                settings.permission_profile
+                                                                    == profile.id,
+                                                            )
+                                                            .on_click(move |_, _, cx| {
+                                                                let id = id.clone();
+                                                                let _ = parent.update(
+                                                                    cx,
+                                                                    |parent, cx| {
+                                                                        parent
+                                                                            .set_permission_profile(
+                                                                                id, cx,
+                                                                            )
+                                                                    },
+                                                                );
+                                                            }),
+                                                    );
+                                                }
+                                                menu = menu
+                                                    .separator()
+                                                    .item(PopupMenuItem::label("Approvals"));
+                                                for reviewer in [
+                                                    ApprovalReviewerMode::User,
+                                                    ApprovalReviewerMode::AutoReview,
+                                                ] {
+                                                    let parent = parent.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(reviewer.label())
+                                                            .checked(
+                                                                settings.approvals_reviewer
+                                                                    == reviewer,
+                                                            )
+                                                            .on_click(move |_, _, cx| {
+                                                                let _ = parent.update(
+                                                                    cx,
+                                                                    |parent, cx| {
+                                                                        parent
+                                                                            .set_approvals_reviewer(
+                                                                                reviewer, cx,
+                                                                            )
+                                                                    },
+                                                                );
+                                                            }),
+                                                    );
+                                                }
+                                                menu
+                                            }
+                                        }),
                                 )
                                 .child(
                                     Button::new("composer-effort")
                                         .small()
                                         .ghost()
                                         .icon(IconName::LoaderCircle)
-                                        .label("5.5 Medium")
-                                        .tooltip("Thinking effort settings"),
+                                        .label(format!("Effort {}", title_case(&settings.effort)))
+                                        .tooltip("Thinking effort settings")
+                                        .dropdown_menu({
+                                            let parent = self.parent.clone();
+                                            let selected_effort = settings.effort.clone();
+                                            move |menu, _, _| {
+                                                let mut menu =
+                                                    menu.min_w(190.).check_side(Side::Left);
+                                                for effort in &effort_options {
+                                                    let value = effort.clone();
+                                                    let parent = parent.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::new(title_case(effort))
+                                                            .checked(*effort == selected_effort)
+                                                            .on_click(move |_, _, cx| {
+                                                                let value = value.clone();
+                                                                let _ = parent.update(
+                                                                    cx,
+                                                                    |parent, cx| {
+                                                                        parent.set_effort(value, cx)
+                                                                    },
+                                                                );
+                                                            }),
+                                                    );
+                                                }
+                                                menu
+                                            }
+                                        }),
                                 ),
                         )
                         .child(
@@ -272,5 +429,13 @@ impl Render for ChatPanel {
                     ),
             )
             .child(self.composer(cx))
+    }
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }

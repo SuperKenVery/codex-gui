@@ -1,12 +1,18 @@
+use crate::gui::{
+    ApprovalReviewerMode, ChatSettings, ModelOption, PermissionMode, PermissionProfileOption,
+    permission_profile_label,
+};
 use crate::workspace::workspace_path;
 use codex_app_server_protocol::{
-    AskForApproval, ClientInfo, InitializeParams, InitializeResponse, JSONRPCError, JSONRPCMessage,
-    JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxMode,
-    ServerNotification, Thread, ThreadForkParams, ThreadForkResponse, ThreadItem,
-    ThreadListCwdFilter, ThreadListParams, ThreadListResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSource, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    TurnStartParams, TurnStartResponse, UserInput,
+    ApprovalsReviewer, AskForApproval, ClientInfo, InitializeCapabilities, InitializeParams,
+    InitializeResponse, JSONRPCError, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
+    JSONRPCResponse, ModelListParams, ModelListResponse, PermissionProfileListParams,
+    PermissionProfileListResponse, RequestId, ServerNotification, Thread, ThreadForkParams,
+    ThreadForkResponse, ThreadItem, ThreadListCwdFilter, ThreadListParams, ThreadListResponse,
+    ThreadResumeParams, ThreadResumeResponse, ThreadSource, ThreadStartParams, ThreadStartResponse,
+    ThreadStatus, TurnStartParams, TurnStartResponse, UserInput,
 };
+use codex_protocol::openai_models::ReasoningEffort;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::{
@@ -19,15 +25,32 @@ use std::{
 };
 
 pub enum BridgeCommand {
-    StartThread { cwd: String },
-    ResumeThread { thread_id: String },
-    SendTurn { thread_id: String, text: String },
-    ForkThread { thread_id: String },
+    StartThread {
+        cwd: String,
+        settings: ChatSettings,
+    },
+    ResumeThread {
+        thread_id: String,
+    },
+    SendTurn {
+        thread_id: String,
+        text: String,
+        settings: ChatSettings,
+    },
+    ForkThread {
+        thread_id: String,
+    },
+    UpdateThreadSettings {
+        thread_id: String,
+        settings: ChatSettings,
+    },
 }
 
 pub enum BridgeEvent {
     Status(String),
     ThreadsLoaded(Vec<Thread>),
+    ModelsLoaded(Vec<ModelOption>),
+    PermissionProfilesLoaded(Vec<PermissionProfileOption>),
     ThreadStarted(Thread),
     ThreadResumed(Thread),
     ThreadForked(Thread),
@@ -116,7 +139,10 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
                 title: Some("codex-gui".into()),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
-            capabilities: None,
+            capabilities: Some(InitializeCapabilities {
+                experimental_api: true,
+                ..Default::default()
+            }),
         },
         &mut requests,
         &mut next_id,
@@ -126,6 +152,38 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
             "Failed to initialize codex app-server: {err}"
         )));
         return;
+    }
+
+    if let Err(err) = send_request(
+        "model/list",
+        ModelListParams {
+            cursor: None,
+            limit: None,
+            include_hidden: None,
+        },
+        &mut requests,
+        &mut next_id,
+        &mut stdin,
+    ) {
+        let _ = event_tx.send(BridgeEvent::Error(format!(
+            "Failed to list codex models: {err}"
+        )));
+    }
+
+    if let Err(err) = send_request(
+        "permissionProfile/list",
+        PermissionProfileListParams {
+            cursor: None,
+            limit: None,
+            cwd: Some(workspace_path()),
+        },
+        &mut requests,
+        &mut next_id,
+        &mut stdin,
+    ) {
+        let _ = event_tx.send(BridgeEvent::Error(format!(
+            "Failed to list codex permission profiles: {err}"
+        )));
     }
 
     if let Err(err) = send_request(
@@ -161,12 +219,15 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
     loop {
         while let Ok(command) = command_rx.try_recv() {
             let result = match command {
-                BridgeCommand::StartThread { cwd } => send_request(
+                BridgeCommand::StartThread { cwd, settings } => send_request(
                     "thread/start",
                     ThreadStartParams {
                         cwd: Some(cwd),
-                        approval_policy: Some(AskForApproval::OnRequest),
-                        sandbox: Some(SandboxMode::WorkspaceWrite),
+                        model: Some(settings.model.clone()),
+                        approval_policy: Some(approval_policy_for(&settings)),
+                        approvals_reviewer: Some(approvals_reviewer_for(&settings)),
+                        permissions: Some(settings.permission_profile.clone()),
+                        sandbox: None,
                         thread_source: Some(ThreadSource::User),
                         ..Default::default()
                     },
@@ -184,7 +245,11 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
                     &mut next_id,
                     &mut stdin,
                 ),
-                BridgeCommand::SendTurn { thread_id, text } => send_request(
+                BridgeCommand::SendTurn {
+                    thread_id,
+                    text,
+                    settings,
+                } => send_request(
                     "turn/start",
                     TurnStartParams {
                         thread_id,
@@ -198,13 +263,13 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
                         environments: None,
                         cwd: None,
                         runtime_workspace_roots: None,
-                        approval_policy: None,
-                        approvals_reviewer: None,
+                        approval_policy: Some(approval_policy_for(&settings)),
+                        approvals_reviewer: Some(approvals_reviewer_for(&settings)),
                         sandbox_policy: None,
-                        permissions: None,
-                        model: None,
+                        permissions: Some(settings.permission_profile.clone()),
+                        model: Some(settings.model.clone()),
                         service_tier: None,
-                        effort: None,
+                        effort: Some(reasoning_effort_for(&settings)),
                         summary: None,
                         personality: None,
                         output_schema: None,
@@ -219,6 +284,23 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
                     ThreadForkParams {
                         thread_id,
                         ..Default::default()
+                    },
+                    &mut requests,
+                    &mut next_id,
+                    &mut stdin,
+                ),
+                BridgeCommand::UpdateThreadSettings {
+                    thread_id,
+                    settings,
+                } => send_request(
+                    "thread/settings/update",
+                    ThreadSettingsUpdateParamsJson {
+                        thread_id,
+                        approval_policy: Some(approval_policy_for(&settings)),
+                        approvals_reviewer: Some(approvals_reviewer_for(&settings)),
+                        permissions: Some(settings.permission_profile),
+                        model: Some(settings.model),
+                        effort: Some(settings.effort),
                     },
                     &mut requests,
                     &mut next_id,
@@ -321,6 +403,44 @@ fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<Br
             };
             let _ = event_tx.send(BridgeEvent::ThreadsLoaded(result.data));
         }
+        "model/list" => {
+            let Ok(result) = decode_result::<ModelListResponse>(response.result, event_tx) else {
+                return;
+            };
+            let models = result
+                .data
+                .into_iter()
+                .filter(|model| !model.hidden)
+                .map(|model| ModelOption {
+                    id: model.model,
+                    display_name: model.display_name,
+                    supported_efforts: model
+                        .supported_reasoning_efforts
+                        .into_iter()
+                        .map(|effort| effort.reasoning_effort.to_string())
+                        .collect(),
+                    default_effort: model.default_reasoning_effort.to_string(),
+                })
+                .collect();
+            let _ = event_tx.send(BridgeEvent::ModelsLoaded(models));
+        }
+        "permissionProfile/list" => {
+            let Ok(result) =
+                decode_result::<PermissionProfileListResponse>(response.result, event_tx)
+            else {
+                return;
+            };
+            let profiles = result
+                .data
+                .into_iter()
+                .map(|profile| PermissionProfileOption {
+                    label: permission_profile_label(&profile.id),
+                    id: profile.id,
+                    description: profile.description,
+                })
+                .collect();
+            let _ = event_tx.send(BridgeEvent::PermissionProfilesLoaded(profiles));
+        }
         "thread/start" => {
             let Ok(result) = decode_result::<ThreadStartResponse>(response.result, event_tx) else {
                 return;
@@ -343,7 +463,41 @@ fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<Br
         "turn/start" => {
             let _ = decode_result::<TurnStartResponse>(response.result, event_tx);
         }
+        "thread/settings/update" => {}
         _ => {}
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadSettingsUpdateParamsJson {
+    thread_id: String,
+    approval_policy: Option<AskForApproval>,
+    approvals_reviewer: Option<ApprovalsReviewer>,
+    permissions: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+fn approval_policy_for(settings: &ChatSettings) -> AskForApproval {
+    if settings.permission_profile == PermissionMode::DangerFullAccess.profile_id() {
+        AskForApproval::Never
+    } else {
+        AskForApproval::OnRequest
+    }
+}
+
+fn reasoning_effort_for(settings: &ChatSettings) -> ReasoningEffort {
+    settings
+        .effort
+        .parse()
+        .unwrap_or_else(|_| ReasoningEffort::Medium)
+}
+
+fn approvals_reviewer_for(settings: &ChatSettings) -> ApprovalsReviewer {
+    match settings.approvals_reviewer {
+        ApprovalReviewerMode::User => ApprovalsReviewer::User,
+        ApprovalReviewerMode::AutoReview => ApprovalsReviewer::AutoReview,
     }
 }
 

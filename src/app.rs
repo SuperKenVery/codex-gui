@@ -1,7 +1,7 @@
 use crate::bridge::{BridgeCommand, BridgeEvent, start_app_server_bridge};
 use crate::gui::{
-    BridgeState, ChatPanel, ChatState, GuiState, Message, MessageState, ProjectState, SideChat,
-    Sidebar, StreamState, ToolCall, ToolStatus, UiState,
+    ApprovalReviewerMode, BridgeState, ChatPanel, ChatState, GuiState, Message, MessageState,
+    ProjectState, SideChat, Sidebar, StreamState, ToolCall, ToolStatus, UiState,
 };
 use crate::workspace::workspace_path;
 use codex_app_server_protocol::{
@@ -120,9 +120,11 @@ impl CodexGui {
     }
 
     pub(crate) fn start_thread(&mut self, cx: &mut Context<Self>) {
+        let settings = self.state.read(cx).chat_settings.clone();
         self.send_bridge(
             BridgeCommand::StartThread {
                 cwd: workspace_path(),
+                settings,
             },
             cx,
         );
@@ -143,8 +145,63 @@ impl CodexGui {
             self.start_thread(cx);
             return;
         }
-        self.send_bridge(BridgeCommand::SendTurn { thread_id, text }, cx);
+        let settings = self.state.read(cx).chat_settings.clone();
+        self.send_bridge(
+            BridgeCommand::SendTurn {
+                thread_id,
+                text,
+                settings,
+            },
+            cx,
+        );
         self.set_bridge_status("turn running", cx);
+    }
+
+    pub(crate) fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.chat_settings.model = model.clone();
+            if let Some(option) = state
+                .available_models
+                .iter()
+                .find(|option| option.id == state.chat_settings.model)
+            {
+                state.chat_settings.effort = option.default_effort.clone();
+            }
+            cx.notify();
+        });
+        self.update_active_thread_settings(cx);
+    }
+
+    pub(crate) fn set_effort(&mut self, effort: String, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            state.chat_settings.effort = effort;
+            cx.notify();
+        });
+        self.update_active_thread_settings(cx);
+    }
+
+    pub(crate) fn set_permission_profile(
+        &mut self,
+        permission_profile: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.chat_settings.permission_profile = permission_profile;
+            cx.notify();
+        });
+        self.update_active_thread_settings(cx);
+    }
+
+    pub(crate) fn set_approvals_reviewer(
+        &mut self,
+        approvals_reviewer: ApprovalReviewerMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.chat_settings.approvals_reviewer = approvals_reviewer;
+            cx.notify();
+        });
+        self.update_active_thread_settings(cx);
     }
 
     pub(crate) fn toggle_side_chat(&mut self, cx: &mut Context<Self>) {
@@ -161,6 +218,25 @@ impl CodexGui {
                 self.set_bridge_status("codex app-server writer stopped", cx);
             }
         }
+    }
+
+    fn update_active_thread_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(thread_id) = self
+            .active_chat_entity(cx)
+            .map(|chat| chat.read(cx).id.clone())
+            .filter(|thread_id| thread_id != "empty" && thread_id != "bridge-error")
+        else {
+            return;
+        };
+        let settings = self.state.read(cx).chat_settings.clone();
+        self.send_bridge(
+            BridgeCommand::UpdateThreadSettings {
+                thread_id,
+                settings,
+            },
+            cx,
+        );
+        self.set_bridge_status("updating settings", cx);
     }
 
     fn set_bridge_status(&self, status: impl Into<String>, cx: &mut Context<Self>) {
@@ -200,6 +276,25 @@ impl CodexGui {
                 });
                 self.set_bridge_status("connected to codex app-server", cx);
             }
+            BridgeEvent::ModelsLoaded(models) => {
+                self.state.update(cx, |state, cx| {
+                    if let Some(default_model) = models
+                        .first()
+                        .filter(|_| state.chat_settings.model.is_empty())
+                    {
+                        state.chat_settings.model = default_model.id.clone();
+                        state.chat_settings.effort = default_model.default_effort.clone();
+                    }
+                    state.available_models = models;
+                    cx.notify();
+                });
+            }
+            BridgeEvent::PermissionProfilesLoaded(profiles) => {
+                self.state.update(cx, |state, cx| {
+                    state.permission_profiles = profiles;
+                    cx.notify();
+                });
+            }
             BridgeEvent::ThreadStarted(thread) | BridgeEvent::ThreadForked(thread) => {
                 let thread_id = thread.id.clone();
                 let chat = chat_entity_from_thread(thread, cx);
@@ -215,7 +310,15 @@ impl CodexGui {
                 });
                 self.set_bridge_status("thread ready", cx);
                 if let Some(text) = self.pending_turn_text.take() {
-                    self.send_bridge(BridgeCommand::SendTurn { thread_id, text }, cx);
+                    let settings = self.state.read(cx).chat_settings.clone();
+                    self.send_bridge(
+                        BridgeCommand::SendTurn {
+                            thread_id,
+                            text,
+                            settings,
+                        },
+                        cx,
+                    );
                     self.set_bridge_status("turn running", cx);
                 }
             }

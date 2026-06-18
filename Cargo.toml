@@ -12,6 +12,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee3
 gpui-component = { git = "https://github.com/longbridge/gpui-component.git", rev = "341619c789e21b941b23c0fb2e535c74bdd4df33" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component.git", rev = "341619c789e21b941b23c0fb2e535c74bdd4df33" }
 codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
+codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 
