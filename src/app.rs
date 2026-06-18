@@ -476,7 +476,7 @@ impl CodexGui {
                             "bridge-error".into(),
                             "Bridge error".into(),
                             message.clone().into(),
-                            vec![cx.new(|_| MessageState::new(Message::Commentary(message)))],
+                            vec![cx.new(|cx| MessageState::new(Message::Commentary(message), cx))],
                         )
                     });
                     project.update(cx, |project, cx| {
@@ -630,7 +630,7 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        let message = cx.new(|_| MessageState::new(message));
+        let message = cx.new(|cx| MessageState::new(message, cx));
         chat.update(cx, |chat, cx| {
             chat.messages.push(message);
             cx.notify();
@@ -662,6 +662,7 @@ impl CodexGui {
                 body.push_str(delta);
                 *state = StreamState::Streaming;
                 message.touch();
+                message.append_body_view_delta(delta, cx);
                 cx.notify();
             }
         });
@@ -722,6 +723,7 @@ impl CodexGui {
                 if let Message::Assistant { state, .. } = &mut message.message {
                     *state = StreamState::Complete;
                     message.touch();
+                    message.sync_body_view(cx);
                     cx.notify();
                 }
             });
@@ -851,10 +853,13 @@ fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
             "empty".into(),
             "No Codex threads".into(),
             "Click New to start one in this workspace".into(),
-            vec![cx.new(|_| {
-                MessageState::new(Message::Commentary(
-                    "No persisted Codex threads were returned for this workspace.".into(),
-                ))
+            vec![cx.new(|cx| {
+                MessageState::new(
+                    Message::Commentary(
+                        "No persisted Codex threads were returned for this workspace.".into(),
+                    ),
+                    cx,
+                )
             })],
         )
     })
@@ -878,17 +883,20 @@ fn append_thread_item(
         ThreadItem::UserMessage { content, .. } => {
             let text = user_input_text(&content);
             if !text.is_empty() {
-                messages.push(cx.new(|_| MessageState::new(Message::User(text))));
+                messages.push(cx.new(|cx| MessageState::new(Message::User(text), cx)));
             }
         }
         ThreadItem::AgentMessage { id, text, .. } => {
-            messages.push(cx.new(|_| {
-                MessageState::new(Message::Assistant {
-                    id,
-                    body: text,
-                    state: StreamState::Complete,
-                    tools: Vec::new(),
-                })
+            messages.push(cx.new(|cx| {
+                MessageState::new(
+                    Message::Assistant {
+                        id,
+                        body: text,
+                        state: StreamState::Complete,
+                        tools: Vec::new(),
+                    },
+                    cx,
+                )
             }));
         }
         ThreadItem::CommandExecution {
@@ -960,13 +968,16 @@ fn push_tool_to_messages(
         }
     }
 
-    messages.push(cx.new(|_| {
-        MessageState::new(Message::Assistant {
-            id: format!("tool-group-{}", tool.id),
-            body: "Codex used a tool.".into(),
-            state: StreamState::Complete,
-            tools: vec![tool],
-        })
+    messages.push(cx.new(|cx| {
+        MessageState::new(
+            Message::Assistant {
+                id: format!("tool-group-{}", tool.id),
+                body: "Codex used a tool.".into(),
+                state: StreamState::Complete,
+                tools: vec![tool],
+            },
+            cx,
+        )
     }));
 }
 

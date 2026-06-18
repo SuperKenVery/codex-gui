@@ -5,8 +5,8 @@ use crate::gui::{
     widgets::{render_message, render_message_state, render_worked_summary},
 };
 use gpui::{
-    AnyElement, Context, Entity, EntityId, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, prelude::*,
+    AnyElement, Context, Entity, EntityId, IntoElement, ListAlignment, ListState, ParentElement,
+    Render, Styled, Subscription, Window, div, list, prelude::*, px,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -15,26 +15,42 @@ pub struct ChatHistory {
     active_chat: Option<Entity<ChatState>>,
     _state_subscription: Subscription,
     chat_subscription: Option<Subscription>,
+    message_subscriptions: Vec<Subscription>,
     expanded_turns: HashSet<EntityId>,
+    list_state: ListState,
+    row_keys: Vec<HistoryRowKey>,
 }
 
 impl ChatHistory {
     pub fn new(state: Entity<GuiState>, cx: &mut Context<Self>) -> Self {
         let active_chat = active_chat_entity(&state, cx);
-        let chat_subscription = active_chat
-            .as_ref()
-            .map(|chat| cx.observe(chat, |_, _, cx| cx.notify()));
+        let chat_subscription = active_chat.as_ref().map(|chat| {
+            cx.observe(chat, |history, _, cx| {
+                history.list_state.remeasure();
+                cx.notify()
+            })
+        });
         let state_subscription = cx.observe(&state, |history, _, cx| {
             history.update_active_chat_subscription(cx);
             cx.notify();
         });
+        let message_subscriptions = active_chat
+            .as_ref()
+            .map(|chat| {
+                let messages = chat.read(cx).messages.clone();
+                subscribe_to_messages(&messages, cx)
+            })
+            .unwrap_or_default();
 
         Self {
             state,
             active_chat,
             _state_subscription: state_subscription,
             chat_subscription,
+            message_subscriptions,
             expanded_turns: HashSet::new(),
+            list_state: ListState::new(0, ListAlignment::Top, px(1000.)),
+            row_keys: Vec::new(),
         }
     }
 
@@ -43,9 +59,21 @@ impl ChatHistory {
         if self.active_chat == active_chat {
             return;
         }
-        self.chat_subscription = active_chat
+        self.chat_subscription = active_chat.as_ref().map(|chat| {
+            cx.observe(chat, |history, _, cx| {
+                history.list_state.remeasure();
+                cx.notify()
+            })
+        });
+        self.message_subscriptions = active_chat
             .as_ref()
-            .map(|chat| cx.observe(chat, |_, _, cx| cx.notify()));
+            .map(|chat| {
+                let messages = chat.read(cx).messages.clone();
+                subscribe_to_messages(&messages, cx)
+            })
+            .unwrap_or_default();
+        self.list_state.reset(0);
+        self.row_keys.clear();
         self.active_chat = active_chat;
     }
 }
@@ -82,9 +110,9 @@ impl Render for MessageState {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_message_state(
             self,
-            true,
-            false,
-            false,
+            self.collapse_tools,
+            self.hide_tools,
+            self.active_tool_tail,
             cx.theme(),
             cx.listener(|message, _, _, cx| {
                 message.toggle_tools();
@@ -100,58 +128,66 @@ impl ChatHistory {
         messages: Vec<Entity<MessageState>>,
         cx: &mut Context<ChatHistory>,
     ) -> AnyElement {
-        let mut list = div()
-            .id("message-list")
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_w_0()
-            .gap_2()
-            .overflow_x_hidden()
-            .overflow_y_scroll();
+        self.sync_message_subscriptions(&messages, cx);
+        let rows = self.rows_from_messages(&messages, cx);
+        self.sync_list_rows(&rows);
 
+        let history = cx.entity().clone();
+        let rows_for_render = rows.clone();
+        list(
+            self.list_state.clone(),
+            move |index, _window, cx| match rows_for_render.get(index).cloned() {
+                Some(HistoryRow::Message(message)) => message.into_any_element(),
+                Some(HistoryRow::Summary { turn_id, duration }) => {
+                    let history = history.clone();
+                    render_worked_summary(duration, cx.theme())
+                        .id(format!("worked-summary-{turn_id}"))
+                        .on_click(move |_, _, cx| {
+                            let _ = history.update(cx, |history, cx| {
+                                if !history.expanded_turns.remove(&turn_id) {
+                                    history.expanded_turns.insert(turn_id);
+                                }
+                                history.rebuild_rows(cx);
+                                cx.notify();
+                            });
+                        })
+                        .into_any_element()
+                }
+                None => div().into_any_element(),
+            },
+        )
+        .size_full()
+        .min_w_0()
+        .into_any_element()
+    }
+
+    fn rows_from_messages(
+        &self,
+        messages: &[Entity<MessageState>],
+        cx: &mut Context<ChatHistory>,
+    ) -> Vec<HistoryRow> {
+        let mut rows = Vec::new();
         let mut index = 0;
         while index < messages.len() {
             if is_user_message(&messages[index], cx) {
-                let next_turn = next_user_index(&messages, index + 1, cx).unwrap_or(messages.len());
-                if let Some(fold) = completed_turn_fold(&messages, index, next_turn, cx) {
+                let next_turn = next_user_index(messages, index + 1, cx).unwrap_or(messages.len());
+                if let Some(fold) = completed_turn_fold(messages, index, next_turn, cx) {
                     let turn_id = messages[index].entity_id();
-                    list = list.child(render_message_entity(
-                        messages[index].clone(),
-                        true,
-                        false,
-                        false,
-                        cx,
-                    ));
-
-                    let summary = render_worked_summary(fold.duration, cx.theme())
-                        .id(format!("worked-summary-{turn_id}"))
-                        .on_click(cx.listener(move |history, _, _, cx| {
-                            if !history.expanded_turns.remove(&turn_id) {
-                                history.expanded_turns.insert(turn_id);
-                            }
-                            cx.notify();
-                        }));
-                    list = list.child(summary);
+                    configure_message(&messages[index], true, false, false, cx);
+                    rows.push(HistoryRow::Message(messages[index].clone()));
+                    rows.push(HistoryRow::Summary {
+                        turn_id,
+                        duration: fold.duration,
+                    });
 
                     if self.expanded_turns.contains(&turn_id) {
                         for message in messages.iter().take(next_turn).skip(index + 1) {
-                            list = list.child(render_message_entity(
-                                message.clone(),
-                                true,
-                                false,
-                                false,
-                                cx,
-                            ));
+                            configure_message(message, true, false, false, cx);
+                            rows.push(HistoryRow::Message(message.clone()));
                         }
                     } else {
-                        list = list.child(render_message_entity(
-                            messages[fold.final_index].clone(),
-                            true,
-                            true,
-                            false,
-                            cx,
-                        ));
+                        configure_message(&messages[fold.final_index], true, true, false, cx);
+                        rows.push(HistoryRow::Message(messages[fold.final_index].clone()));
                     }
 
                     index = next_turn;
@@ -159,42 +195,111 @@ impl ChatHistory {
                 }
             }
 
-            let active_tail = is_active_tool_tail(&messages, index, cx);
-            list = list.child(render_message_entity(
-                messages[index].clone(),
-                true,
-                false,
-                active_tail,
-                cx,
-            ));
+            let active_tail = is_active_tool_tail(messages, index, cx);
+            configure_message(&messages[index], true, false, active_tail, cx);
+            rows.push(HistoryRow::Message(messages[index].clone()));
             index += 1;
         }
+        rows
+    }
 
-        list.into_any_element()
+    fn sync_list_rows(&mut self, rows: &[HistoryRow]) {
+        let next_keys = rows.iter().map(HistoryRow::key).collect::<Vec<_>>();
+        if next_keys == self.row_keys {
+            return;
+        }
+
+        let old_len = self.row_keys.len();
+        let new_len = next_keys.len();
+        let prefix = self
+            .row_keys
+            .iter()
+            .zip(next_keys.iter())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let suffix = self.row_keys[prefix..]
+            .iter()
+            .rev()
+            .zip(next_keys[prefix..].iter().rev())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let old_end = old_len.saturating_sub(suffix);
+        let new_end = new_len.saturating_sub(suffix);
+        self.list_state.splice(prefix..old_end, new_end - prefix);
+        self.row_keys = next_keys;
+    }
+
+    fn sync_message_subscriptions(
+        &mut self,
+        messages: &[Entity<MessageState>],
+        cx: &mut Context<ChatHistory>,
+    ) {
+        if self.message_subscriptions.len() == messages.len() {
+            return;
+        }
+        self.message_subscriptions = subscribe_to_messages(messages, cx);
+    }
+
+    fn rebuild_rows(&mut self, cx: &mut Context<ChatHistory>) {
+        let Some(chat) = &self.active_chat else {
+            self.sync_list_rows(&[]);
+            return;
+        };
+        let messages = chat.read(cx).messages.clone();
+        let rows = self.rows_from_messages(&messages, cx);
+        self.sync_list_rows(&rows);
     }
 }
 
-fn render_message_entity(
-    message: Entity<MessageState>,
+#[derive(Clone)]
+enum HistoryRow {
+    Message(Entity<MessageState>),
+    Summary {
+        turn_id: EntityId,
+        duration: Duration,
+    },
+}
+
+impl HistoryRow {
+    fn key(&self) -> HistoryRowKey {
+        match self {
+            HistoryRow::Message(message) => HistoryRowKey::Message(message.entity_id()),
+            HistoryRow::Summary { turn_id, .. } => HistoryRowKey::Summary(*turn_id),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HistoryRowKey {
+    Message(EntityId),
+    Summary(EntityId),
+}
+
+fn configure_message(
+    message: &Entity<MessageState>,
     collapse_tools: bool,
     hide_tools: bool,
     active_tool_tail: bool,
     cx: &mut Context<ChatHistory>,
-) -> impl IntoElement {
-    let message_state = message.read(cx);
-    render_message_state(
-        message_state,
-        collapse_tools,
-        hide_tools,
-        active_tool_tail,
-        cx.theme(),
-        move |_, _, cx| {
-            let _ = message.update(cx, |message, cx| {
-                message.toggle_tools();
+) {
+    message.update(cx, |message, _| {
+        message.set_render_options(collapse_tools, hide_tools, active_tool_tail);
+    });
+}
+
+fn subscribe_to_messages(
+    messages: &[Entity<MessageState>],
+    cx: &mut Context<ChatHistory>,
+) -> Vec<Subscription> {
+    messages
+        .iter()
+        .map(|message| {
+            cx.observe(message, |history, _, cx| {
+                history.list_state.remeasure();
                 cx.notify();
-            });
-        },
-    )
+            })
+        })
+        .collect()
 }
 
 struct TurnFold {

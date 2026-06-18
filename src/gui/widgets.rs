@@ -2,17 +2,21 @@ use std::time::Duration;
 
 use crate::gui::{Message, MessageState, StreamState, ToolCall, ToolStatus};
 use gpui::{
-    App, ClickEvent, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+    App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 use gpui_component::{
     Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     clipboard::Clipboard,
     h_flex,
-    text::markdown,
+    text::{TextView, TextViewState, markdown},
     theme::Theme,
     v_flex,
 };
+
+const LARGE_MARKDOWN_BODY_BYTES: usize = 12 * 1024;
+const LARGE_MARKDOWN_VIEW_HEIGHT: f32 = 520.;
 
 pub(super) fn chat_tree_item(
     id: impl Into<gpui::ElementId>,
@@ -61,7 +65,7 @@ pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
 }
 
 pub(super) fn render_message(message: &Message, theme: &Theme) -> impl IntoElement {
-    render_message_view(message, false, false, false, theme, None)
+    render_message_view(message, None, false, false, false, theme, None)
 }
 
 pub(super) fn render_message_state(
@@ -74,6 +78,7 @@ pub(super) fn render_message_state(
 ) -> impl IntoElement {
     render_message_view(
         &message.message,
+        message.body_view.as_ref(),
         collapse_tools,
         hide_tools,
         active_tool_tail,
@@ -94,6 +99,7 @@ pub(super) fn render_worked_summary(duration: Duration, theme: &Theme) -> gpui::
 
 fn render_message_view(
     message: &Message,
+    body_view: Option<&Entity<TextViewState>>,
     collapse_tools: bool,
     hide_tools: bool,
     active_tool_tail: bool,
@@ -104,10 +110,14 @@ fn render_message_view(
     )>,
 ) -> gpui::Div {
     match message {
-        Message::User(body) => message_block("You", body, theme, MessageBodyFormat::Plain),
-        Message::Commentary(body) => {
-            message_block("Commentary", body, theme, MessageBodyFormat::Markdown)
-        }
+        Message::User(body) => message_block("You", body, None, theme, MessageBodyFormat::Plain),
+        Message::Commentary(body) => message_block(
+            "Commentary",
+            body,
+            body_view,
+            theme,
+            MessageBodyFormat::Markdown,
+        ),
         Message::Assistant {
             body, state, tools, ..
         } => {
@@ -117,6 +127,7 @@ fn render_message_view(
                     StreamState::Streaming => "Codex is working",
                 },
                 body,
+                body_view,
                 theme,
                 MessageBodyFormat::Markdown,
             );
@@ -160,6 +171,7 @@ enum MessageBodyFormat {
 fn message_block(
     author: &'static str,
     body: &str,
+    body_view: Option<&Entity<TextViewState>>,
     theme: &Theme,
     body_format: MessageBodyFormat,
 ) -> gpui::Div {
@@ -171,14 +183,22 @@ fn message_block(
             .whitespace_normal()
             .child(body.to_string())
             .into_any_element(),
-        MessageBodyFormat::Markdown => markdown(body.to_string())
-            .selectable(true)
-            .code_block_actions(|code_block, _, _| {
-                h_flex()
-                    .gap_1()
-                    .child(Clipboard::new("copy-code").value(code_block.code().clone()))
-            })
-            .into_any_element(),
+        MessageBodyFormat::Markdown => {
+            let is_large_body = body.len() >= LARGE_MARKDOWN_BODY_BYTES;
+            body_view
+                .map(TextView::new)
+                .unwrap_or_else(|| markdown(body.to_string()))
+                .selectable(true)
+                .code_block_actions(|code_block, _, _| {
+                    h_flex()
+                        .gap_1()
+                        .child(Clipboard::new("copy-code").value(code_block.code().clone()))
+                })
+                .when(is_large_body, |view| {
+                    view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
+                })
+                .into_any_element()
+        }
     };
 
     div()

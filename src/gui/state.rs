@@ -1,6 +1,7 @@
 use std::time::Instant;
 
-use gpui::{Entity, SharedString};
+use gpui::{AppContext, Context, Entity, SharedString};
+use gpui_component::text::TextViewState;
 
 pub struct GuiState {
     pub projects: Vec<Entity<ProjectState>>,
@@ -172,16 +173,26 @@ pub struct MessageState {
     pub created_at: Instant,
     pub updated_at: Instant,
     pub tools_expanded: bool,
+    pub body_view: Option<Entity<TextViewState>>,
+    pub collapse_tools: bool,
+    pub hide_tools: bool,
+    pub active_tool_tail: bool,
 }
 
 impl MessageState {
-    pub fn new(message: Message) -> Self {
+    pub fn new(message: Message, cx: &mut Context<Self>) -> Self {
         let now = Instant::now();
+        let body_view =
+            markdown_body(&message).map(|body| cx.new(|cx| TextViewState::markdown(body, cx)));
         Self {
             message,
             created_at: now,
             updated_at: now,
             tools_expanded: false,
+            body_view,
+            collapse_tools: true,
+            hide_tools: false,
+            active_tool_tail: false,
         }
     }
 
@@ -192,6 +203,59 @@ impl MessageState {
     pub fn toggle_tools(&mut self) {
         self.tools_expanded = !self.tools_expanded;
         self.touch();
+    }
+
+    pub fn sync_body_view(&mut self, cx: &mut Context<Self>) {
+        match markdown_body(&self.message) {
+            Some(body) => {
+                if let Some(body_view) = &self.body_view {
+                    body_view.update(cx, |body_view, cx| body_view.set_text(body, cx));
+                } else {
+                    self.body_view = Some(cx.new(|cx| TextViewState::markdown(body, cx)));
+                }
+            }
+            None => {
+                self.body_view = None;
+            }
+        }
+    }
+
+    pub fn append_body_view_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
+        if delta.is_empty() {
+            return;
+        }
+
+        match markdown_body(&self.message) {
+            Some(body) => {
+                if let Some(body_view) = &self.body_view {
+                    body_view.update(cx, |body_view, cx| body_view.push_str(delta, cx));
+                } else {
+                    self.body_view = Some(cx.new(|cx| TextViewState::markdown(body, cx)));
+                }
+            }
+            None => {
+                self.body_view = None;
+            }
+        }
+    }
+
+    pub fn set_render_options(
+        &mut self,
+        collapse_tools: bool,
+        hide_tools: bool,
+        active_tool_tail: bool,
+    ) {
+        self.collapse_tools = collapse_tools;
+        self.hide_tools = hide_tools;
+        self.active_tool_tail = active_tool_tail;
+    }
+}
+
+fn markdown_body(message: &Message) -> Option<&str> {
+    match message {
+        Message::Commentary(body) => Some(body),
+        Message::Assistant { body, .. } => Some(body),
+        Message::User(_) => None,
     }
 }
 
