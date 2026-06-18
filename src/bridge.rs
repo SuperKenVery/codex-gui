@@ -1,6 +1,15 @@
 use crate::models::{Chat, Message, StreamState, ToolCall, ToolStatus};
 use crate::workspace::workspace_path;
-use serde_json::{Value, json};
+use codex_app_server_protocol::{
+    AskForApproval, ClientInfo, CommandExecutionStatus, DynamicToolCallStatus, InitializeParams,
+    InitializeResponse, JSONRPCError, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
+    JSONRPCResponse, McpToolCallStatus, RequestId, SandboxMode, ServerNotification, Thread,
+    ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadListCwdFilter, ThreadListParams,
+    ThreadListResponse, ThreadSource, ThreadStartParams, ThreadStartResponse, ThreadStatus,
+    TurnStartParams, TurnStartResponse, UserInput,
+};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Write},
@@ -106,22 +115,20 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
 
     let mut requests = PendingRequests::default();
     let mut next_id = 1_i64;
-    let mut send_request = |method: &str, params: Value, requests: &mut PendingRequests| {
-        let id = next_id;
-        next_id += 1;
-        requests.insert(id, method.to_string());
-        let request = json!({ "id": id, "method": method, "params": params });
-        writeln!(stdin, "{request}")?;
-        stdin.flush()
-    };
 
     if let Err(err) = send_request(
         "initialize",
-        json!({
-            "clientInfo": { "name": "codex-gui", "version": env!("CARGO_PKG_VERSION") },
-            "capabilities": null
-        }),
+        InitializeParams {
+            client_info: ClientInfo {
+                name: "codex-gui".into(),
+                title: Some("codex-gui".into()),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+            capabilities: None,
+        },
         &mut requests,
+        &mut next_id,
+        &mut stdin,
     ) {
         let _ = event_tx.send(BridgeEvent::Error(format!(
             "Failed to initialize codex app-server: {err}"
@@ -131,13 +138,21 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
 
     if let Err(err) = send_request(
         "thread/list",
-        json!({
-            "limit": 30,
-            "cwd": workspace_path(),
-            "archived": false,
-            "useStateDbOnly": false
-        }),
+        ThreadListParams {
+            cursor: None,
+            limit: Some(30),
+            sort_key: None,
+            sort_direction: None,
+            model_providers: None,
+            source_kinds: None,
+            archived: Some(false),
+            cwd: Some(ThreadListCwdFilter::One(workspace_path())),
+            use_state_db_only: false,
+            search_term: None,
+        },
         &mut requests,
+        &mut next_id,
+        &mut stdin,
     ) {
         let _ = event_tx.send(BridgeEvent::Error(format!(
             "Failed to list codex threads: {err}"
@@ -156,26 +171,56 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
             let result = match command {
                 BridgeCommand::StartThread { cwd } => send_request(
                     "thread/start",
-                    json!({
-                        "cwd": cwd,
-                        "approvalPolicy": "on-request",
-                        "sandbox": "workspace-write",
-                        "threadSource": "user"
-                    }),
+                    ThreadStartParams {
+                        cwd: Some(cwd),
+                        approval_policy: Some(AskForApproval::OnRequest),
+                        sandbox: Some(SandboxMode::WorkspaceWrite),
+                        thread_source: Some(ThreadSource::User),
+                        ..Default::default()
+                    },
                     &mut requests,
+                    &mut next_id,
+                    &mut stdin,
                 ),
                 BridgeCommand::SendTurn { thread_id, text } => send_request(
                     "turn/start",
-                    json!({
-                        "threadId": thread_id,
-                        "input": [{ "type": "text", "text": text, "text_elements": [] }]
-                    }),
+                    TurnStartParams {
+                        thread_id,
+                        client_user_message_id: None,
+                        input: vec![UserInput::Text {
+                            text,
+                            text_elements: Vec::new(),
+                        }],
+                        responsesapi_client_metadata: None,
+                        additional_context: None,
+                        environments: None,
+                        cwd: None,
+                        runtime_workspace_roots: None,
+                        approval_policy: None,
+                        approvals_reviewer: None,
+                        sandbox_policy: None,
+                        permissions: None,
+                        model: None,
+                        service_tier: None,
+                        effort: None,
+                        summary: None,
+                        personality: None,
+                        output_schema: None,
+                        collaboration_mode: None,
+                    },
                     &mut requests,
+                    &mut next_id,
+                    &mut stdin,
                 ),
                 BridgeCommand::ForkThread { thread_id } => send_request(
                     "thread/fork",
-                    json!({ "threadId": thread_id }),
+                    ThreadForkParams {
+                        thread_id,
+                        ..Default::default()
+                    },
                     &mut requests,
+                    &mut next_id,
+                    &mut stdin,
                 ),
             };
             if let Err(err) = result {
@@ -213,8 +258,30 @@ impl PendingRequests {
     }
 }
 
+fn send_request<P: Serialize>(
+    method: &'static str,
+    params: P,
+    requests: &mut PendingRequests,
+    next_id: &mut i64,
+    stdin: &mut impl Write,
+) -> std::io::Result<()> {
+    let id = *next_id;
+    *next_id += 1;
+    requests.insert(id, method.to_string());
+    let params = serde_json::to_value(params).map_err(std::io::Error::other)?;
+    let request = JSONRPCRequest {
+        id: RequestId::Integer(id),
+        method: method.into(),
+        params: Some(params),
+        trace: None,
+    };
+    let request = serde_json::to_string(&request).map_err(std::io::Error::other)?;
+    writeln!(stdin, "{request}")?;
+    stdin.flush()
+}
+
 fn handle_server_line(line: &str, event_tx: &Sender<BridgeEvent>, requests: &mut PendingRequests) {
-    let parsed: Value = match serde_json::from_str(line) {
+    let parsed: JSONRPCMessage = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
             let _ = event_tx.send(BridgeEvent::Error(format!(
@@ -224,205 +291,171 @@ fn handle_server_line(line: &str, event_tx: &Sender<BridgeEvent>, requests: &mut
         }
     };
 
-    if let Some(error) = parsed.get("error") {
-        let _ = event_tx.send(BridgeEvent::Error(format!("app-server error: {error}")));
-        return;
-    }
-
-    if let Some(id) = parsed.get("id").and_then(Value::as_i64) {
-        let method = requests.remove(id).unwrap_or_default();
-        let result = parsed.get("result").cloned().unwrap_or(Value::Null);
-        handle_response(&method, result, event_tx);
-        return;
-    }
-
-    if let Some(method) = parsed.get("method").and_then(Value::as_str) {
-        let params = parsed.get("params").cloned().unwrap_or(Value::Null);
-        handle_notification(method, params, event_tx);
+    match parsed {
+        JSONRPCMessage::Response(response) => {
+            let method = request_id_i64(&response.id)
+                .and_then(|id| requests.remove(id))
+                .unwrap_or_default();
+            handle_response(&method, response, event_tx);
+        }
+        JSONRPCMessage::Error(error) => handle_rpc_error(error, event_tx),
+        JSONRPCMessage::Notification(notification) => handle_notification(notification, event_tx),
+        JSONRPCMessage::Request(_) => {}
     }
 }
 
-fn handle_response(method: &str, result: Value, event_tx: &Sender<BridgeEvent>) {
+fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<BridgeEvent>) {
     match method {
         "initialize" => {
-            let user_agent = result
-                .get("userAgent")
-                .and_then(Value::as_str)
-                .unwrap_or("Codex app-server");
+            let Ok(result) = decode_result::<InitializeResponse>(response.result, event_tx) else {
+                return;
+            };
+            let user_agent = result.user_agent;
             let _ = event_tx.send(BridgeEvent::Status(format!("connected: {user_agent}")));
         }
         "thread/list" => {
-            let chats = result
-                .get("data")
-                .and_then(Value::as_array)
-                .map(|threads| threads.iter().map(chat_from_thread).collect())
-                .unwrap_or_default();
+            let Ok(result) = decode_result::<ThreadListResponse>(response.result, event_tx) else {
+                return;
+            };
+            let chats = result.data.iter().map(chat_from_thread).collect();
             let _ = event_tx.send(BridgeEvent::ThreadsLoaded(chats));
         }
         "thread/start" => {
-            if let Some(thread) = result.get("thread") {
-                let _ = event_tx.send(BridgeEvent::ThreadStarted(chat_from_thread(thread)));
-            }
+            let Ok(result) = decode_result::<ThreadStartResponse>(response.result, event_tx) else {
+                return;
+            };
+            let _ = event_tx.send(BridgeEvent::ThreadStarted(chat_from_thread(&result.thread)));
         }
         "thread/fork" => {
-            if let Some(thread) = result.get("thread") {
-                let _ = event_tx.send(BridgeEvent::ThreadForked(chat_from_thread(thread)));
-            }
+            let Ok(result) = decode_result::<ThreadForkResponse>(response.result, event_tx) else {
+                return;
+            };
+            let _ = event_tx.send(BridgeEvent::ThreadForked(chat_from_thread(&result.thread)));
         }
         "turn/start" => {
-            if let Some(turn) = result.get("turn") {
-                if let Some(thread_id) = turn.get("threadId").and_then(Value::as_str) {
-                    let _ = event_tx.send(BridgeEvent::TurnStarted {
-                        thread_id: thread_id.into(),
-                    });
-                }
-            }
+            let _ = decode_result::<TurnStartResponse>(response.result, event_tx);
         }
         _ => {}
     }
 }
 
-fn handle_notification(method: &str, params: Value, event_tx: &Sender<BridgeEvent>) {
-    match method {
-        "thread/started" => {
-            if let Some(thread) = params.get("thread") {
-                let _ = event_tx.send(BridgeEvent::ThreadStarted(chat_from_thread(thread)));
-            }
+fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<BridgeEvent>) {
+    let notification = match ServerNotification::try_from(notification) {
+        Ok(notification) => notification,
+        Err(err) => {
+            let _ = event_tx.send(BridgeEvent::Error(format!(
+                "Invalid app-server notification: {err}"
+            )));
+            return;
         }
-        "turn/started" => {
-            if let Some(thread_id) = params.get("threadId").and_then(Value::as_str) {
-                let _ = event_tx.send(BridgeEvent::TurnStarted {
-                    thread_id: thread_id.into(),
-                });
-            }
+    };
+
+    match notification {
+        ServerNotification::ThreadStarted(params) => {
+            let _ = event_tx.send(BridgeEvent::ThreadStarted(chat_from_thread(&params.thread)));
         }
-        "item/started" => {
-            if let (Some(thread_id), Some(item)) = (
-                params.get("threadId").and_then(Value::as_str),
-                params.get("item"),
-            ) {
-                emit_item_started(thread_id, item, event_tx);
-            }
+        ServerNotification::TurnStarted(params) => {
+            let _ = event_tx.send(BridgeEvent::TurnStarted {
+                thread_id: params.thread_id,
+            });
         }
-        "item/agentMessage/delta" => {
-            if let (Some(thread_id), Some(item_id), Some(delta)) = (
-                params.get("threadId").and_then(Value::as_str),
-                params.get("itemId").and_then(Value::as_str),
-                params.get("delta").and_then(Value::as_str),
-            ) {
-                let _ = event_tx.send(BridgeEvent::AgentMessageDelta {
-                    thread_id: thread_id.into(),
-                    item_id: item_id.into(),
-                    delta: delta.into(),
-                });
-            }
+        ServerNotification::ItemStarted(params) => {
+            emit_item_started(&params.thread_id, &params.item, event_tx);
         }
-        "item/commandExecution/outputDelta" | "command/exec/outputDelta" => {
-            if let (Some(thread_id), Some(item_id), Some(delta)) = (
-                params.get("threadId").and_then(Value::as_str),
-                params.get("itemId").and_then(Value::as_str),
-                params.get("delta").and_then(Value::as_str),
-            ) {
-                let _ = event_tx.send(BridgeEvent::ToolOutputDelta {
-                    thread_id: thread_id.into(),
-                    item_id: item_id.into(),
-                    delta: delta.into(),
-                });
-            }
+        ServerNotification::AgentMessageDelta(params) => {
+            let _ = event_tx.send(BridgeEvent::AgentMessageDelta {
+                thread_id: params.thread_id,
+                item_id: params.item_id,
+                delta: params.delta,
+            });
         }
-        "item/completed" => {
-            if let (Some(thread_id), Some(item)) = (
-                params.get("threadId").and_then(Value::as_str),
-                params.get("item"),
-            ) {
-                emit_item_completed(thread_id, item, event_tx);
-            }
+        ServerNotification::CommandExecutionOutputDelta(params) => {
+            let _ = event_tx.send(BridgeEvent::ToolOutputDelta {
+                thread_id: params.thread_id,
+                item_id: params.item_id,
+                delta: params.delta,
+            });
         }
-        "thread/status/changed" => {
-            if let Some(status) = params.get("status") {
-                let _ = event_tx.send(BridgeEvent::Status(format!(
-                    "thread {}",
-                    status_label(status)
-                )));
-            }
+        ServerNotification::ItemCompleted(params) => {
+            emit_item_completed(&params.thread_id, &params.item, event_tx);
         }
-        "turn/completed" => {
+        ServerNotification::ThreadStatusChanged(params) => {
+            let _ = event_tx.send(BridgeEvent::Status(format!(
+                "thread {}",
+                thread_status_label(&params.status)
+            )));
+        }
+        ServerNotification::TurnCompleted(_) => {
             let _ = event_tx.send(BridgeEvent::Status("turn complete".into()));
         }
-        "error" => {
-            let message = params
-                .get("message")
-                .and_then(Value::as_str)
-                .map(String::from)
-                .unwrap_or_else(|| format!("{params}"));
-            let _ = event_tx.send(BridgeEvent::Error(message));
+        ServerNotification::Error(params) => {
+            let _ = event_tx.send(BridgeEvent::Error(params.error.message));
         }
         _ => {}
     }
 }
 
-fn emit_item_started(thread_id: &str, item: &Value, event_tx: &Sender<BridgeEvent>) {
-    let Some(item_type) = item.get("type").and_then(Value::as_str) else {
-        return;
-    };
-    let item_id = item
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown-item")
-        .to_string();
+fn request_id_i64(id: &RequestId) -> Option<i64> {
+    match id {
+        RequestId::Integer(id) => Some(*id),
+        RequestId::String(_) => None,
+    }
+}
 
-    match item_type {
-        "userMessage" => {
-            let text = user_input_text(item.get("content"));
+fn handle_rpc_error(error: JSONRPCError, event_tx: &Sender<BridgeEvent>) {
+    let _ = event_tx.send(BridgeEvent::Error(format!(
+        "app-server error: {}",
+        error.error.message
+    )));
+}
+
+fn decode_result<T: DeserializeOwned>(
+    result: serde_json::Value,
+    event_tx: &Sender<BridgeEvent>,
+) -> Result<T, ()> {
+    serde_json::from_value(result).map_err(|err| {
+        let _ = event_tx.send(BridgeEvent::Error(format!(
+            "Invalid app-server response: {err}"
+        )));
+    })
+}
+
+fn emit_item_started(thread_id: &str, item: &ThreadItem, event_tx: &Sender<BridgeEvent>) {
+    match item {
+        ThreadItem::UserMessage { content, .. } => {
+            let text = user_input_text(content);
             let _ = event_tx.send(BridgeEvent::UserMessage {
                 thread_id: thread_id.into(),
                 text,
             });
         }
-        "agentMessage" => {
-            let text = item
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        ThreadItem::AgentMessage { id, text, .. } => {
             let _ = event_tx.send(BridgeEvent::AgentMessageStarted {
                 thread_id: thread_id.into(),
-                item_id,
-                text,
+                item_id: id.clone(),
+                text: text.clone(),
             });
         }
-        "commandExecution" => {
-            let command = item
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("command")
-                .to_string();
-            let cwd = item
-                .get("cwd")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        ThreadItem::CommandExecution {
+            id, command, cwd, ..
+        } => {
             let _ = event_tx.send(BridgeEvent::ToolStarted {
                 thread_id: thread_id.into(),
                 tool: ToolCall {
-                    id: item_id,
-                    name: command,
+                    id: id.clone(),
+                    name: tool_name(command, "command"),
                     status: ToolStatus::Running,
-                    detail: cwd,
+                    detail: cwd.display().to_string(),
                 },
             });
         }
-        "mcpToolCall" | "dynamicToolCall" => {
-            let name = item
-                .get("tool")
-                .and_then(Value::as_str)
-                .unwrap_or(item_type)
-                .to_string();
+        ThreadItem::McpToolCall { id, tool, .. }
+        | ThreadItem::DynamicToolCall { id, tool, .. } => {
             let _ = event_tx.send(BridgeEvent::ToolStarted {
                 thread_id: thread_id.into(),
                 tool: ToolCall {
-                    id: item_id,
-                    name,
+                    id: id.clone(),
+                    name: tool_name(tool, "tool call"),
                     status: ToolStatus::Running,
                     detail: "tool call started".into(),
                 },
@@ -432,110 +465,70 @@ fn emit_item_started(thread_id: &str, item: &Value, event_tx: &Sender<BridgeEven
     }
 }
 
-fn emit_item_completed(thread_id: &str, item: &Value, event_tx: &Sender<BridgeEvent>) {
-    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
-        let _ = event_tx.send(BridgeEvent::ItemCompleted {
-            thread_id: thread_id.into(),
-            item_id: item_id.into(),
-        });
-    }
+fn emit_item_completed(thread_id: &str, item: &ThreadItem, event_tx: &Sender<BridgeEvent>) {
+    let _ = event_tx.send(BridgeEvent::ItemCompleted {
+        thread_id: thread_id.into(),
+        item_id: item.id().into(),
+    });
 }
 
-fn chat_from_thread(thread: &Value) -> Chat {
-    let id = thread
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown-thread")
-        .to_string();
+fn chat_from_thread(thread: &Thread) -> Chat {
     let title = thread
-        .get("name")
-        .and_then(Value::as_str)
+        .name
+        .as_deref()
         .filter(|name| !name.is_empty())
-        .or_else(|| thread.get("preview").and_then(Value::as_str))
+        .or_else(|| Some(thread.preview.as_str()))
         .filter(|preview| !preview.is_empty())
         .unwrap_or("Untitled Codex thread");
-    let cwd = thread
-        .get("cwd")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let subtitle = format!("{} - {}", status_label(&thread["status"]), cwd);
+    let cwd = thread.cwd.display().to_string();
+    let subtitle = format!("{} - {}", thread_status_label(&thread.status), cwd);
     let mut chat = Chat {
-        id,
+        id: thread.id.clone(),
         title: title.into(),
         subtitle: subtitle.into(),
         messages: Vec::new(),
     };
 
-    if let Some(turns) = thread.get("turns").and_then(Value::as_array) {
-        for turn in turns {
-            if let Some(items) = turn.get("items").and_then(Value::as_array) {
-                for item in items {
-                    append_thread_item(&mut chat, item);
-                }
-            }
+    for turn in &thread.turns {
+        for item in &turn.items {
+            append_thread_item(&mut chat, item);
         }
     }
 
     chat
 }
 
-fn status_label(status: &Value) -> String {
-    status
-        .as_str()
-        .or_else(|| status.get("type").and_then(Value::as_str))
-        .unwrap_or("unknown")
-        .to_string()
-}
-
-fn append_thread_item(chat: &mut Chat, item: &Value) {
-    match item.get("type").and_then(Value::as_str) {
-        Some("userMessage") => {
-            let text = user_input_text(item.get("content"));
+fn append_thread_item(chat: &mut Chat, item: &ThreadItem) {
+    match item {
+        ThreadItem::UserMessage { content, .. } => {
+            let text = user_input_text(content);
             if !text.is_empty() {
                 chat.messages.push(Message::User(text));
             }
         }
-        Some("agentMessage") => {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("agent-message")
-                .to_string();
-            let body = item
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        ThreadItem::AgentMessage { id, text, .. } => {
             chat.messages.push(Message::Assistant {
-                id,
-                body,
+                id: id.clone(),
+                body: text.clone(),
                 state: StreamState::Complete,
                 tools: Vec::new(),
             });
         }
-        Some("commandExecution") => {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("command")
-                .to_string();
-            let name = item
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("command")
-                .to_string();
-            let detail = item
-                .get("aggregatedOutput")
-                .and_then(Value::as_str)
-                .or_else(|| item.get("cwd").and_then(Value::as_str))
-                .unwrap_or("")
-                .to_string();
+        ThreadItem::CommandExecution {
+            id,
+            command,
+            cwd,
+            aggregated_output,
+            status,
+            ..
+        } => {
             let tool = ToolCall {
-                id,
-                name,
-                status: ToolStatus::Done,
-                detail,
+                id: id.clone(),
+                name: tool_name(command, "command"),
+                status: tool_status_from_command(status),
+                detail: aggregated_output
+                    .clone()
+                    .unwrap_or_else(|| cwd.display().to_string()),
             };
             if let Some(Message::Assistant { tools, .. }) = chat
                 .messages
@@ -553,27 +546,99 @@ fn append_thread_item(chat: &mut Chat, item: &Value) {
                 });
             }
         }
+        ThreadItem::McpToolCall {
+            id, tool, status, ..
+        } => {
+            let tool = ToolCall {
+                id: id.clone(),
+                name: tool_name(tool, "tool call"),
+                status: tool_status_from_mcp(status),
+                detail: String::new(),
+            };
+            push_tool_to_chat(chat, tool);
+        }
+        ThreadItem::DynamicToolCall {
+            id, tool, status, ..
+        } => {
+            let tool = ToolCall {
+                id: id.clone(),
+                name: tool_name(tool, "tool call"),
+                status: tool_status_from_dynamic(status),
+                detail: String::new(),
+            };
+            push_tool_to_chat(chat, tool);
+        }
         _ => {}
     }
 }
 
-fn user_input_text(content: Option<&Value>) -> String {
+fn push_tool_to_chat(chat: &mut Chat, tool: ToolCall) {
+    if let Some(Message::Assistant { tools, .. }) = chat
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| matches!(message, Message::Assistant { .. }))
+    {
+        tools.push(tool);
+    } else {
+        chat.messages.push(Message::Assistant {
+            id: format!("tool-group-{}", tool.id),
+            body: "Codex used a tool.".into(),
+            state: StreamState::Complete,
+            tools: vec![tool],
+        });
+    }
+}
+
+fn thread_status_label(status: &ThreadStatus) -> &'static str {
+    match status {
+        ThreadStatus::NotLoaded => "not loaded",
+        ThreadStatus::Idle => "idle",
+        ThreadStatus::SystemError => "system error",
+        ThreadStatus::Active { .. } => "active",
+    }
+}
+
+fn tool_status_from_command(status: &CommandExecutionStatus) -> ToolStatus {
+    match status {
+        CommandExecutionStatus::InProgress => ToolStatus::Running,
+        CommandExecutionStatus::Completed
+        | CommandExecutionStatus::Failed
+        | CommandExecutionStatus::Declined => ToolStatus::Done,
+    }
+}
+
+fn tool_status_from_mcp(status: &McpToolCallStatus) -> ToolStatus {
+    match status {
+        McpToolCallStatus::InProgress => ToolStatus::Running,
+        McpToolCallStatus::Completed | McpToolCallStatus::Failed => ToolStatus::Done,
+    }
+}
+
+fn tool_status_from_dynamic(status: &DynamicToolCallStatus) -> ToolStatus {
+    match status {
+        DynamicToolCallStatus::InProgress => ToolStatus::Running,
+        DynamicToolCallStatus::Completed | DynamicToolCallStatus::Failed => ToolStatus::Done,
+    }
+}
+
+fn tool_name(name: &str, fallback: &str) -> String {
+    if name.is_empty() {
+        fallback.into()
+    } else {
+        name.into()
+    }
+}
+
+fn user_input_text(content: &[UserInput]) -> String {
     content
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    if item.get("type").and_then(Value::as_str) == Some("text") {
-                        item.get("text").and_then(Value::as_str)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+        .iter()
+        .filter_map(|input| match input {
+            UserInput::Text { text, .. } => Some(text.as_str()),
+            _ => None,
         })
-        .unwrap_or_default()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn empty_chat() -> Chat {

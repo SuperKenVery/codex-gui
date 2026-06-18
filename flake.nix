@@ -58,6 +58,9 @@
 
           devShells.default = craneLib.devShell {
             checks = self.checks.${system};
+            env = {
+              RUST_BACKTRACE="1";
+            };
           };
         };
     in

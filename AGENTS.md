@@ -11,7 +11,6 @@ An opensource clone of the codex desktop app.
   - Fork chat (fork to new chat)
   - Normal chatting with streaming state update: commentary messages, tool calls, thinking animation etc.
 - Use app server to communicate with codex
-- 
 
 ## Non Goals (yet)
 
@@ -24,3 +23,8 @@ An opensource clone of the codex desktop app.
 ## Dev environment
 
 Manage environment and packaging with nix and cranelib.
+
+## Code style
+
+- Keep code clean and maintainable. Split into files or modules when neccessary.
+- When a possible refactor can largely simplify code or easier to read/maintain, actively suggest me

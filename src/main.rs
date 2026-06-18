@@ -2,18 +2,20 @@
 
 mod app;
 mod bridge;
+mod gui;
 mod models;
 mod workspace;
 
 use app::CodexGui;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui_component::{Root, Theme};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
 
 fn run_app() {
     application().with_assets(Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
+        Theme::sync_system_appearance(None, cx);
 
         let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
         cx.open_window(
