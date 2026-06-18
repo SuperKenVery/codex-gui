@@ -26,6 +26,7 @@ pub(super) fn chat_tree_item(
         .selected(selected)
         .with_size(px(0.))
         .w_full()
+        .rounded_lg()
         .child(
             v_flex()
                 .w_full()
@@ -44,17 +45,6 @@ pub(super) fn chat_tree_item(
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .child(title),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .text_xs()
-                        .line_height(px(16.))
-                        .text_color(theme.muted_foreground)
-                        .overflow_x_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(subtitle),
                 ),
         )
 }

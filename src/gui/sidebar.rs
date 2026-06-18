@@ -1,8 +1,8 @@
 use crate::app::CodexGui;
 use crate::gui::{GuiState, widgets::chat_tree_item};
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
-    div, prelude::*, px,
+    Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
+    WeakEntity, Window, WindowControlArea, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -13,6 +13,7 @@ use gpui_component::{
 pub struct Sidebar {
     parent: WeakEntity<CodexGui>,
     state: Entity<GuiState>,
+    should_move_window: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -26,6 +27,7 @@ impl Sidebar {
         Self {
             parent,
             state,
+            should_move_window: false,
             _subscriptions: subscriptions,
         }
     }
@@ -84,6 +86,7 @@ impl Render for Sidebar {
                             .selected(project_selected)
                             .with_size(px(0.))
                             .w_full()
+                            .rounded_lg()
                             .child(
                                 div()
                                     .flex()
@@ -91,7 +94,8 @@ impl Render for Sidebar {
                                     .gap_2()
                                     .w_full()
                                     .min_w_0()
-                                    .py_2()
+                                    .py_1p5()
+                                    .px_2()
                                     .child(
                                         Icon::new(if project_selected {
                                             IconName::FolderOpen
@@ -150,8 +154,37 @@ impl Render for Sidebar {
             .bg(cx.theme().sidebar.opacity(0.28))
             .text_color(cx.theme().sidebar_foreground)
             .px_3()
-            .py_4()
+            .pb_4()
             .gap_4()
+            .child(
+                div()
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down_out(cx.listener(|view, _, _, _| {
+                        view.should_move_window = false;
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, _| {
+                            view.should_move_window = true;
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, _| {
+                            view.should_move_window = false;
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|view, _, window, _| {
+                        if view.should_move_window {
+                            view.should_move_window = false;
+                            window.start_window_move();
+                        }
+                    }))
+                    .h(px(20.))
+                    .w_full()
+                    .flex()
+                    .items_center(),
+            )
             .child(
                 Button::new("start-thread")
                     .ghost()

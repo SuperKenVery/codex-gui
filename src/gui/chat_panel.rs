@@ -1,8 +1,8 @@
 use crate::app::CodexGui;
 use crate::gui::{ApprovalReviewerMode, BridgeState, ChatHistory, GuiState, widgets::status_pill};
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
-    div, prelude::*, px,
+    Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
+    WeakEntity, Window, WindowControlArea, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Side, Sizable as _,
@@ -17,6 +17,7 @@ pub struct ChatPanel {
     bridge_state: Entity<BridgeState>,
     history: Entity<ChatHistory>,
     composer_input: Entity<InputState>,
+    should_move_window: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,6 +52,7 @@ impl ChatPanel {
             bridge_state,
             history,
             composer_input,
+            should_move_window: false,
             _subscriptions: subscriptions,
         }
     }
@@ -142,6 +144,7 @@ impl ChatPanel {
                         .items_center()
                         .justify_between()
                         .gap_2()
+                        .px_2()
                         .child(
                             div()
                                 .flex()
@@ -301,6 +304,7 @@ impl ChatPanel {
                             Button::new("send-composer-turn")
                                 .small()
                                 .primary()
+                                .rounded(px(999.))
                                 .icon(IconName::ArrowUp)
                                 .tooltip("Send")
                                 .on_click(cx.listener(|view, _, window, cx| {
@@ -342,6 +346,28 @@ impl Render for ChatPanel {
             .child(
                 div()
                     .h(px(58.))
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down_out(cx.listener(|view, _, _, _| {
+                        view.should_move_window = false;
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, _| {
+                            view.should_move_window = true;
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view, _, _, _| {
+                            view.should_move_window = false;
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|view, _, window, _| {
+                        if view.should_move_window {
+                            view.should_move_window = false;
+                            window.start_window_move();
+                        }
+                    }))
                     .flex()
                     .items_center()
                     .border_b_1()
@@ -388,6 +414,9 @@ impl Render for ChatPanel {
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
                                     .child(status_pill(bridge_status, cx.theme()))
                                     .child(
                                         Button::new("fork-chat")

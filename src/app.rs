@@ -9,8 +9,8 @@ use codex_app_server_protocol::{
     ThreadStatus, UserInput,
 };
 use gpui::{
-    Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription, Task,
-    Window, div, prelude::*, px, transparent_black,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task, Window, div,
+    prelude::*, transparent_black,
 };
 use gpui_component::ActiveTheme as _;
 use std::{
@@ -718,28 +718,14 @@ impl Render for CodexGui {
             .text_color(cx.theme().foreground)
             .font_family(".SystemUIFont")
             .child(
-                div()
-                    .relative()
-                    .size_full()
-                    .child(
-                        div()
-                            .flex()
-                            .size_full()
-                            .child(self.sidebar.clone())
-                            .child(self.chat_panel.clone())
-                            .when(side_chat_open, |this| this.child(self.side_chat.clone())),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .w(px(286.))
-                            .h(px(42.))
-                            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                                window.start_window_move()
-                            }),
-                    ),
+                div().relative().size_full().child(
+                    div()
+                        .flex()
+                        .size_full()
+                        .child(self.sidebar.clone())
+                        .child(self.chat_panel.clone())
+                        .when(side_chat_open, |this| this.child(self.side_chat.clone())),
+                ),
             )
     }
 }
