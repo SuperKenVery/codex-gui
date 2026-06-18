@@ -1,13 +1,14 @@
 use crate::app::CodexGui;
-use crate::gui::{
-    GuiState,
-    widgets::{command_button, nav_item, section_label},
-};
+use crate::gui::{GuiState, widgets::chat_tree_item};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
     div, prelude::*, px,
 };
-use gpui_component::{ActiveTheme as _, button::ButtonVariants as _, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    v_flex,
+};
 
 pub struct Sidebar {
     parent: WeakEntity<CodexGui>,
@@ -49,20 +50,6 @@ impl Sidebar {
             let _ = parent.update(cx, |parent, cx| parent.start_thread(cx));
         });
     }
-
-    fn fork_chat(&mut self, cx: &mut Context<Self>) {
-        let parent = self.parent.clone();
-        cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.fork_chat(cx));
-        });
-    }
-
-    fn toggle_side_chat(&mut self, cx: &mut Context<Self>) {
-        let parent = self.parent.clone();
-        cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.toggle_side_chat(cx));
-        });
-    }
 }
 
 impl Render for Sidebar {
@@ -76,42 +63,82 @@ impl Render for Sidebar {
             )
         };
 
-        let project_items =
-            v_flex()
-                .gap_1()
-                .children(projects.iter().enumerate().map(|(index, project)| {
-                    let (name, path) = {
+        let project_tree =
+            projects
+                .iter()
+                .enumerate()
+                .fold(v_flex().gap_1(), |tree, (project_index, project)| {
+                    let (name, path, chats) = {
                         let project = project.read(cx);
-                        (project.name.clone(), project.path.clone())
-                    };
-                    let selected = index == active_project;
-                    nav_item(format!("project-{index}"), name, path, selected, cx.theme())
-                        .on_click(cx.listener(move |view, _, _, cx| view.select_project(index, cx)))
-                }));
-
-        let chat_items = projects
-            .get(active_project)
-            .map(|project| {
-                let chats = project.read(cx).chats.clone();
-                v_flex()
-                    .gap_1()
-                    .children(chats.iter().enumerate().map(|(index, chat)| {
-                        let (title, subtitle) = {
-                            let chat = chat.read(cx);
-                            (chat.title.clone(), chat.subtitle.clone())
-                        };
-                        let selected = index == active_chat;
-                        nav_item(
-                            format!("chat-{index}"),
-                            title,
-                            subtitle,
-                            selected,
-                            cx.theme(),
+                        (
+                            project.name.clone(),
+                            project.path.clone(),
+                            project.chats.clone(),
                         )
-                        .on_click(cx.listener(move |view, _, _, cx| view.select_chat(index, cx)))
-                    }))
-            })
-            .unwrap_or_else(|| v_flex().gap_1());
+                    };
+                    let project_selected = project_index == active_project;
+                    let tree = tree.child(
+                        Button::new(format!("project-{project_index}"))
+                            .ghost()
+                            .tooltip(path)
+                            .selected(project_selected)
+                            .with_size(px(0.))
+                            .w_full()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .w_full()
+                                    .min_w_0()
+                                    .py_2()
+                                    .child(
+                                        Icon::new(if project_selected {
+                                            IconName::FolderOpen
+                                        } else {
+                                            IconName::Folder
+                                        })
+                                        .small()
+                                        .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .overflow_x_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(name),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.select_project(project_index, cx)
+                            })),
+                    );
+
+                    if project_selected {
+                        tree.child(v_flex().gap_1().children(chats.iter().enumerate().map(
+                            |(chat_index, chat)| {
+                                let (title, subtitle) = {
+                                    let chat = chat.read(cx);
+                                    (chat.title.clone(), chat.subtitle.clone())
+                                };
+                                chat_tree_item(
+                                    format!("chat-{project_index}-{chat_index}"),
+                                    title,
+                                    subtitle,
+                                    chat_index == active_chat,
+                                    cx.theme(),
+                                )
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| view.select_chat(chat_index, cx),
+                                ))
+                            },
+                        )))
+                    } else {
+                        tree
+                    }
+                });
 
         div()
             .w(px(286.))
@@ -119,11 +146,29 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar)
+            .border_color(cx.theme().border.opacity(0.35))
+            .bg(cx.theme().sidebar.opacity(0.28))
             .text_color(cx.theme().sidebar_foreground)
-            .p_3()
-            .gap_3()
+            .px_3()
+            .py_4()
+            .gap_4()
+            .child(
+                Button::new("start-thread")
+                    .ghost()
+                    .w_full()
+                    .with_size(px(0.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .py_2()
+                            .child(Icon::new(IconName::Plus).small())
+                            .child(div().text_sm().child("New chat")),
+                    )
+                    .on_click(cx.listener(|view, _, _, cx| view.start_thread(cx))),
+            )
             .child(
                 div()
                     .id("sidebar-scroll")
@@ -132,29 +177,8 @@ impl Render for Sidebar {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .child(section_label("Projects", cx.theme()))
-                    .child(project_items)
-                    .child(section_label("Codex Threads", cx.theme()))
-                    .child(chat_items),
-            )
-            .child(
-                div()
-                    .flex()
                     .gap_2()
-                    .child(
-                        command_button("start-thread", "New")
-                            .primary()
-                            .on_click(cx.listener(|view, _, _, cx| view.start_thread(cx))),
-                    )
-                    .child(
-                        command_button("fork-chat", "Fork")
-                            .on_click(cx.listener(|view, _, _, cx| view.fork_chat(cx))),
-                    )
-                    .child(
-                        command_button("toggle-side-chat", "Side")
-                            .on_click(cx.listener(|view, _, _, cx| view.toggle_side_chat(cx))),
-                    ),
+                    .child(project_tree),
             )
     }
 }

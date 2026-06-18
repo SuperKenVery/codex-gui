@@ -14,14 +14,7 @@ use gpui_component::{
     v_flex,
 };
 
-pub(super) fn section_label(text: &'static str, theme: &Theme) -> impl IntoElement {
-    div()
-        .text_xs()
-        .text_color(theme.muted_foreground)
-        .child(text.to_ascii_uppercase())
-}
-
-pub(super) fn nav_item(
+pub(super) fn chat_tree_item(
     id: impl Into<gpui::ElementId>,
     title: SharedString,
     subtitle: SharedString,
@@ -37,15 +30,19 @@ pub(super) fn nav_item(
             v_flex()
                 .w_full()
                 .min_w_0()
-                .gap_1()
+                .gap_0p5()
                 .items_start()
-                .py_2()
+                .py_1p5()
+                .pl_7()
+                .pr_2()
                 .child(
                     div()
                         .w_full()
                         .text_sm()
                         .line_height(px(18.))
-                        .whitespace_normal()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
                         .child(title),
                 )
                 .child(
@@ -54,14 +51,12 @@ pub(super) fn nav_item(
                         .text_xs()
                         .line_height(px(16.))
                         .text_color(theme.muted_foreground)
-                        .whitespace_normal()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
                         .child(subtitle),
                 ),
         )
-}
-
-pub(super) fn command_button(id: &'static str, label: &'static str) -> Button {
-    Button::new(id).small().label(label)
 }
 
 pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
@@ -211,13 +206,7 @@ fn message_block(
                 .text_color(theme.muted_foreground)
                 .child(author),
         )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .overflow_x_hidden()
-                .child(body),
-        )
+        .child(div().w_full().min_w_0().overflow_x_hidden().child(body))
 }
 
 fn render_tool_summary(tools: &[ToolCall], theme: &Theme, expanded: bool) -> gpui::Div {

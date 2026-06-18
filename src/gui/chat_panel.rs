@@ -1,15 +1,12 @@
 use crate::app::CodexGui;
-use crate::gui::{
-    BridgeState, ChatHistory, GuiState,
-    widgets::{command_button, status_pill},
-};
+use crate::gui::{BridgeState, ChatHistory, GuiState, widgets::status_pill};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
     div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _,
-    button::ButtonVariants as _,
+    ActiveTheme as _, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
 };
 
@@ -74,22 +71,87 @@ impl ChatPanel {
         });
     }
 
+    fn fork_chat(&mut self, cx: &mut Context<Self>) {
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.fork_chat(cx));
+        });
+    }
+
+    fn toggle_side_chat(&mut self, cx: &mut Context<Self>) {
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.toggle_side_chat(cx));
+        });
+    }
+
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .p_4()
-            .flex()
-            .items_end()
-            .gap_3()
-            .child(Input::new(&self.composer_input).h(px(112.)).flex_1())
-            .child(
-                command_button("send-composer-turn", "Send")
-                    .primary()
-                    .on_click(
-                        cx.listener(|view, _, window, cx| view.send_composer_turn(window, cx)),
-                    ),
-            )
+        div().w_full().px_5().pb_5().flex().justify_center().child(
+            div()
+                .w_full()
+                .max_w(px(820.))
+                .rounded_lg()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .shadow_sm()
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    Input::new(&self.composer_input)
+                        .appearance(false)
+                        .h(px(92.))
+                        .w_full(),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    Button::new("composer-attach")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::Plus)
+                                        .tooltip("Add context"),
+                                )
+                                .child(
+                                    Button::new("composer-permissions")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::Check)
+                                        .label("Approve for me")
+                                        .tooltip("Permission settings"),
+                                )
+                                .child(
+                                    Button::new("composer-effort")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::LoaderCircle)
+                                        .label("5.5 Medium")
+                                        .tooltip("Thinking effort settings"),
+                                ),
+                        )
+                        .child(
+                            Button::new("send-composer-turn")
+                                .small()
+                                .primary()
+                                .icon(IconName::ArrowUp)
+                                .tooltip("Send")
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.send_composer_turn(window, cx)
+                                })),
+                        ),
+                ),
+        )
     }
 }
 
@@ -125,39 +187,73 @@ impl Render for ChatPanel {
                     .h(px(58.))
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap_3()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .px_5()
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .w_full()
+                            .max_w(px(820.))
+                            .mx_auto()
                             .flex()
-                            .flex_col()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
                             .child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
-                                    .text_lg()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .overflow_x_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(title),
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_lg()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .overflow_x_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .overflow_x_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(subtitle),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .overflow_x_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(subtitle),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(status_pill(bridge_status, cx.theme()))
+                                    .child(
+                                        Button::new("fork-chat")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Copy)
+                                            .tooltip("Fork chat")
+                                            .on_click(
+                                                cx.listener(|view, _, _, cx| view.fork_chat(cx)),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("toggle-side-chat")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::PanelRightOpen)
+                                            .tooltip("Open side chat")
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.toggle_side_chat(cx)
+                                            })),
+                                    ),
                             ),
-                    )
-                    .child(status_pill(bridge_status, cx.theme())),
+                    ),
             )
             .child(
                 div()
@@ -165,8 +261,15 @@ impl Render for ChatPanel {
                     .min_w_0()
                     .min_h_0()
                     .overflow_hidden()
-                    .p_5()
-                    .child(self.history.clone()),
+                    .px_5()
+                    .py_4()
+                    .child(
+                        div()
+                            .size_full()
+                            .max_w(px(820.))
+                            .mx_auto()
+                            .child(self.history.clone()),
+                    ),
             )
             .child(self.composer(cx))
     }
