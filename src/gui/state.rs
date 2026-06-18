@@ -1,4 +1,3 @@
-use crate::models::Message;
 use gpui::{Entity, SharedString};
 
 pub struct GuiState {
@@ -64,6 +63,38 @@ impl MessageState {
     pub fn new(message: Message) -> Self {
         Self { message }
     }
+}
+
+#[derive(Clone)]
+pub enum Message {
+    User(String),
+    Assistant {
+        id: String,
+        body: String,
+        state: StreamState,
+        tools: Vec<ToolCall>,
+    },
+    Commentary(String),
+}
+
+#[derive(Clone, Copy)]
+pub enum StreamState {
+    Complete,
+    Streaming,
+}
+
+#[derive(Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub status: ToolStatus,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy)]
+pub enum ToolStatus {
+    Running,
+    Done,
 }
 
 pub struct BridgeState {

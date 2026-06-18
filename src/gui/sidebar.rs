@@ -77,41 +77,34 @@ impl Render for Sidebar {
         };
 
         let project_items =
-            projects
-                .iter()
-                .enumerate()
-                .fold(v_flex().gap_1(), |list, (index, project)| {
+            v_flex()
+                .gap_1()
+                .children(projects.iter().enumerate().map(|(index, project)| {
                     let (name, path) = {
                         let project = project.read(cx);
                         (project.name.clone(), project.path.clone())
                     };
                     let selected = index == active_project;
-                    list.child(
-                        nav_item(format!("project-{index}"), name, path, selected).on_click(
-                            cx.listener(move |view, _, _, cx| view.select_project(index, cx)),
-                        ),
-                    )
-                });
+                    nav_item(format!("project-{index}"), name, path, selected)
+                        .on_click(cx.listener(move |view, _, _, cx| view.select_project(index, cx)))
+                }));
 
         let chat_items = projects
             .get(active_project)
             .map(|project| {
                 let chats = project.read(cx).chats.clone();
-                chats
-                    .iter()
-                    .enumerate()
-                    .fold(v_flex().gap_1(), |list, (index, chat)| {
+                v_flex()
+                    .gap_1()
+                    .children(chats.iter().enumerate().map(|(index, chat)| {
                         let (title, subtitle) = {
                             let chat = chat.read(cx);
                             (chat.title.clone(), chat.subtitle.clone())
                         };
                         let selected = index == active_chat;
-                        list.child(
-                            nav_item(format!("chat-{index}"), title, subtitle, selected).on_click(
-                                cx.listener(move |view, _, _, cx| view.select_chat(index, cx)),
-                            ),
+                        nav_item(format!("chat-{index}"), title, subtitle, selected).on_click(
+                            cx.listener(move |view, _, _, cx| view.select_chat(index, cx)),
                         )
-                    })
+                    }))
             })
             .unwrap_or_else(|| v_flex().gap_1());
 

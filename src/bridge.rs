@@ -1,12 +1,10 @@
-use crate::models::{Chat, Message, StreamState, ToolCall, ToolStatus};
 use crate::workspace::workspace_path;
 use codex_app_server_protocol::{
-    AskForApproval, ClientInfo, CommandExecutionStatus, DynamicToolCallStatus, InitializeParams,
-    InitializeResponse, JSONRPCError, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
-    JSONRPCResponse, McpToolCallStatus, RequestId, SandboxMode, ServerNotification, Thread,
-    ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadListCwdFilter, ThreadListParams,
-    ThreadListResponse, ThreadSource, ThreadStartParams, ThreadStartResponse, ThreadStatus,
-    TurnStartParams, TurnStartResponse, UserInput,
+    AskForApproval, ClientInfo, InitializeParams, InitializeResponse, JSONRPCError, JSONRPCMessage,
+    JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxMode,
+    ServerNotification, Thread, ThreadForkParams, ThreadForkResponse, ThreadItem,
+    ThreadListCwdFilter, ThreadListParams, ThreadListResponse, ThreadSource, ThreadStartParams,
+    ThreadStartResponse, ThreadStatus, TurnStartParams, TurnStartResponse, UserInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -27,29 +25,20 @@ pub enum BridgeCommand {
 
 pub enum BridgeEvent {
     Status(String),
-    ThreadsLoaded(Vec<Chat>),
-    ThreadStarted(Chat),
-    ThreadForked(Chat),
+    ThreadsLoaded(Vec<Thread>),
+    ThreadStarted(Thread),
+    ThreadForked(Thread),
     TurnStarted {
         thread_id: String,
     },
-    UserMessage {
+    ItemStarted {
         thread_id: String,
-        text: String,
-    },
-    AgentMessageStarted {
-        thread_id: String,
-        item_id: String,
-        text: String,
+        item: ThreadItem,
     },
     AgentMessageDelta {
         thread_id: String,
         item_id: String,
         delta: String,
-    },
-    ToolStarted {
-        thread_id: String,
-        tool: ToolCall,
     },
     ToolOutputDelta {
         thread_id: String,
@@ -58,7 +47,7 @@ pub enum BridgeEvent {
     },
     ItemCompleted {
         thread_id: String,
-        item_id: String,
+        item: ThreadItem,
     },
     Error(String),
 }
@@ -317,20 +306,19 @@ fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<Br
             let Ok(result) = decode_result::<ThreadListResponse>(response.result, event_tx) else {
                 return;
             };
-            let chats = result.data.iter().map(chat_from_thread).collect();
-            let _ = event_tx.send(BridgeEvent::ThreadsLoaded(chats));
+            let _ = event_tx.send(BridgeEvent::ThreadsLoaded(result.data));
         }
         "thread/start" => {
             let Ok(result) = decode_result::<ThreadStartResponse>(response.result, event_tx) else {
                 return;
             };
-            let _ = event_tx.send(BridgeEvent::ThreadStarted(chat_from_thread(&result.thread)));
+            let _ = event_tx.send(BridgeEvent::ThreadStarted(result.thread));
         }
         "thread/fork" => {
             let Ok(result) = decode_result::<ThreadForkResponse>(response.result, event_tx) else {
                 return;
             };
-            let _ = event_tx.send(BridgeEvent::ThreadForked(chat_from_thread(&result.thread)));
+            let _ = event_tx.send(BridgeEvent::ThreadForked(result.thread));
         }
         "turn/start" => {
             let _ = decode_result::<TurnStartResponse>(response.result, event_tx);
@@ -352,7 +340,7 @@ fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<Brid
 
     match notification {
         ServerNotification::ThreadStarted(params) => {
-            let _ = event_tx.send(BridgeEvent::ThreadStarted(chat_from_thread(&params.thread)));
+            let _ = event_tx.send(BridgeEvent::ThreadStarted(params.thread));
         }
         ServerNotification::TurnStarted(params) => {
             let _ = event_tx.send(BridgeEvent::TurnStarted {
@@ -360,7 +348,10 @@ fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<Brid
             });
         }
         ServerNotification::ItemStarted(params) => {
-            emit_item_started(&params.thread_id, &params.item, event_tx);
+            let _ = event_tx.send(BridgeEvent::ItemStarted {
+                thread_id: params.thread_id,
+                item: params.item,
+            });
         }
         ServerNotification::AgentMessageDelta(params) => {
             let _ = event_tx.send(BridgeEvent::AgentMessageDelta {
@@ -377,7 +368,10 @@ fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<Brid
             });
         }
         ServerNotification::ItemCompleted(params) => {
-            emit_item_completed(&params.thread_id, &params.item, event_tx);
+            let _ = event_tx.send(BridgeEvent::ItemCompleted {
+                thread_id: params.thread_id,
+                item: params.item,
+            });
         }
         ServerNotification::ThreadStatusChanged(params) => {
             let _ = event_tx.send(BridgeEvent::Status(format!(
@@ -420,234 +414,11 @@ fn decode_result<T: DeserializeOwned>(
     })
 }
 
-fn emit_item_started(thread_id: &str, item: &ThreadItem, event_tx: &Sender<BridgeEvent>) {
-    match item {
-        ThreadItem::UserMessage { content, .. } => {
-            let text = user_input_text(content);
-            let _ = event_tx.send(BridgeEvent::UserMessage {
-                thread_id: thread_id.into(),
-                text,
-            });
-        }
-        ThreadItem::AgentMessage { id, text, .. } => {
-            let _ = event_tx.send(BridgeEvent::AgentMessageStarted {
-                thread_id: thread_id.into(),
-                item_id: id.clone(),
-                text: text.clone(),
-            });
-        }
-        ThreadItem::CommandExecution {
-            id, command, cwd, ..
-        } => {
-            let _ = event_tx.send(BridgeEvent::ToolStarted {
-                thread_id: thread_id.into(),
-                tool: ToolCall {
-                    id: id.clone(),
-                    name: tool_name(command, "command"),
-                    status: ToolStatus::Running,
-                    detail: cwd.display().to_string(),
-                },
-            });
-        }
-        ThreadItem::McpToolCall { id, tool, .. }
-        | ThreadItem::DynamicToolCall { id, tool, .. } => {
-            let _ = event_tx.send(BridgeEvent::ToolStarted {
-                thread_id: thread_id.into(),
-                tool: ToolCall {
-                    id: id.clone(),
-                    name: tool_name(tool, "tool call"),
-                    status: ToolStatus::Running,
-                    detail: "tool call started".into(),
-                },
-            });
-        }
-        _ => {}
-    }
-}
-
-fn emit_item_completed(thread_id: &str, item: &ThreadItem, event_tx: &Sender<BridgeEvent>) {
-    let _ = event_tx.send(BridgeEvent::ItemCompleted {
-        thread_id: thread_id.into(),
-        item_id: item.id().into(),
-    });
-}
-
-fn chat_from_thread(thread: &Thread) -> Chat {
-    let title = thread
-        .name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .or_else(|| Some(thread.preview.as_str()))
-        .filter(|preview| !preview.is_empty())
-        .unwrap_or("Untitled Codex thread");
-    let cwd = thread.cwd.display().to_string();
-    let subtitle = format!("{} - {}", thread_status_label(&thread.status), cwd);
-    let mut chat = Chat {
-        id: thread.id.clone(),
-        title: title.into(),
-        subtitle: subtitle.into(),
-        messages: Vec::new(),
-    };
-
-    for turn in &thread.turns {
-        for item in &turn.items {
-            append_thread_item(&mut chat, item);
-        }
-    }
-
-    chat
-}
-
-fn append_thread_item(chat: &mut Chat, item: &ThreadItem) {
-    match item {
-        ThreadItem::UserMessage { content, .. } => {
-            let text = user_input_text(content);
-            if !text.is_empty() {
-                chat.messages.push(Message::User(text));
-            }
-        }
-        ThreadItem::AgentMessage { id, text, .. } => {
-            chat.messages.push(Message::Assistant {
-                id: id.clone(),
-                body: text.clone(),
-                state: StreamState::Complete,
-                tools: Vec::new(),
-            });
-        }
-        ThreadItem::CommandExecution {
-            id,
-            command,
-            cwd,
-            aggregated_output,
-            status,
-            ..
-        } => {
-            let tool = ToolCall {
-                id: id.clone(),
-                name: tool_name(command, "command"),
-                status: tool_status_from_command(status),
-                detail: aggregated_output
-                    .clone()
-                    .unwrap_or_else(|| cwd.display().to_string()),
-            };
-            if let Some(Message::Assistant { tools, .. }) = chat
-                .messages
-                .iter_mut()
-                .rev()
-                .find(|message| matches!(message, Message::Assistant { .. }))
-            {
-                tools.push(tool);
-            } else {
-                chat.messages.push(Message::Assistant {
-                    id: format!("tool-group-{}", tool.id),
-                    body: "Codex used a tool.".into(),
-                    state: StreamState::Complete,
-                    tools: vec![tool],
-                });
-            }
-        }
-        ThreadItem::McpToolCall {
-            id, tool, status, ..
-        } => {
-            let tool = ToolCall {
-                id: id.clone(),
-                name: tool_name(tool, "tool call"),
-                status: tool_status_from_mcp(status),
-                detail: String::new(),
-            };
-            push_tool_to_chat(chat, tool);
-        }
-        ThreadItem::DynamicToolCall {
-            id, tool, status, ..
-        } => {
-            let tool = ToolCall {
-                id: id.clone(),
-                name: tool_name(tool, "tool call"),
-                status: tool_status_from_dynamic(status),
-                detail: String::new(),
-            };
-            push_tool_to_chat(chat, tool);
-        }
-        _ => {}
-    }
-}
-
-fn push_tool_to_chat(chat: &mut Chat, tool: ToolCall) {
-    if let Some(Message::Assistant { tools, .. }) = chat
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|message| matches!(message, Message::Assistant { .. }))
-    {
-        tools.push(tool);
-    } else {
-        chat.messages.push(Message::Assistant {
-            id: format!("tool-group-{}", tool.id),
-            body: "Codex used a tool.".into(),
-            state: StreamState::Complete,
-            tools: vec![tool],
-        });
-    }
-}
-
 fn thread_status_label(status: &ThreadStatus) -> &'static str {
     match status {
         ThreadStatus::NotLoaded => "not loaded",
         ThreadStatus::Idle => "idle",
         ThreadStatus::SystemError => "system error",
         ThreadStatus::Active { .. } => "active",
-    }
-}
-
-fn tool_status_from_command(status: &CommandExecutionStatus) -> ToolStatus {
-    match status {
-        CommandExecutionStatus::InProgress => ToolStatus::Running,
-        CommandExecutionStatus::Completed
-        | CommandExecutionStatus::Failed
-        | CommandExecutionStatus::Declined => ToolStatus::Done,
-    }
-}
-
-fn tool_status_from_mcp(status: &McpToolCallStatus) -> ToolStatus {
-    match status {
-        McpToolCallStatus::InProgress => ToolStatus::Running,
-        McpToolCallStatus::Completed | McpToolCallStatus::Failed => ToolStatus::Done,
-    }
-}
-
-fn tool_status_from_dynamic(status: &DynamicToolCallStatus) -> ToolStatus {
-    match status {
-        DynamicToolCallStatus::InProgress => ToolStatus::Running,
-        DynamicToolCallStatus::Completed | DynamicToolCallStatus::Failed => ToolStatus::Done,
-    }
-}
-
-fn tool_name(name: &str, fallback: &str) -> String {
-    if name.is_empty() {
-        fallback.into()
-    } else {
-        name.into()
-    }
-}
-
-fn user_input_text(content: &[UserInput]) -> String {
-    content
-        .iter()
-        .filter_map(|input| match input {
-            UserInput::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub fn empty_chat() -> Chat {
-    Chat {
-        id: "empty".into(),
-        title: "No Codex threads".into(),
-        subtitle: "Click New to start one in this workspace".into(),
-        messages: vec![Message::Commentary(
-            "No persisted Codex threads were returned for this workspace.".into(),
-        )],
     }
 }

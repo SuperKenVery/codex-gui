@@ -1,5 +1,4 @@
-use crate::gui::{ChatState, GuiState, MessageState, widgets::render_message};
-use crate::models::Message;
+use crate::gui::{ChatState, GuiState, Message, MessageState, widgets::render_message};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
     prelude::*,

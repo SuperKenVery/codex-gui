@@ -1,4 +1,4 @@
-use crate::models::{Message, StreamState, ToolCall, ToolStatus};
+use crate::gui::{Message, StreamState, ToolCall, ToolStatus};
 use gpui::{IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px, rgb};
 use gpui_component::{
     Selectable as _, Sizable as _,

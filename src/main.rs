@@ -3,7 +3,6 @@
 mod app;
 mod bridge;
 mod gui;
-mod models;
 mod workspace;
 
 use app::CodexGui;

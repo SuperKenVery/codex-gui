@@ -1,10 +1,13 @@
-use crate::bridge::{BridgeCommand, BridgeEvent, empty_chat, start_app_server_bridge};
+use crate::bridge::{BridgeCommand, BridgeEvent, start_app_server_bridge};
 use crate::gui::{
-    BridgeState, ChatPanel, ChatState, GuiState, MessageState, ProjectState, SideChat, Sidebar,
-    UiState,
+    BridgeState, ChatPanel, ChatState, GuiState, Message, MessageState, ProjectState, SideChat,
+    Sidebar, StreamState, ToolCall, ToolStatus, UiState,
 };
-use crate::models::{Chat, Message, StreamState, ToolCall, ToolStatus};
 use crate::workspace::workspace_path;
+use codex_app_server_protocol::{
+    CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, Thread, ThreadItem,
+    ThreadStatus, UserInput,
+};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task, Window, div,
     prelude::*,
@@ -165,16 +168,15 @@ impl CodexGui {
     fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
         match event {
             BridgeEvent::Status(status) => self.set_bridge_status(status, cx),
-            BridgeEvent::ThreadsLoaded(chats) => {
-                let chats = if chats.is_empty() {
-                    vec![empty_chat()]
+            BridgeEvent::ThreadsLoaded(threads) => {
+                let chats = if threads.is_empty() {
+                    vec![empty_chat_entity(cx)]
                 } else {
-                    chats
+                    threads
+                        .into_iter()
+                        .map(|thread| chat_entity_from_thread(thread, cx))
+                        .collect::<Vec<_>>()
                 };
-                let chats = chats
-                    .into_iter()
-                    .map(|chat| chat_entity_from_model(chat, cx))
-                    .collect::<Vec<_>>();
                 if let Some(project) = self.active_project_entity(cx) {
                     project.update(cx, |project, cx| {
                         project.chats = chats;
@@ -187,9 +189,9 @@ impl CodexGui {
                 });
                 self.set_bridge_status("connected to codex app-server", cx);
             }
-            BridgeEvent::ThreadStarted(chat) | BridgeEvent::ThreadForked(chat) => {
-                let thread_id = chat.id.clone();
-                let chat = chat_entity_from_model(chat, cx);
+            BridgeEvent::ThreadStarted(thread) | BridgeEvent::ThreadForked(thread) => {
+                let thread_id = thread.id.clone();
+                let chat = chat_entity_from_thread(thread, cx);
                 if let Some(project) = self.active_project_entity(cx) {
                     project.update(cx, |project, cx| {
                         upsert_chat(project, chat, &thread_id, cx);
@@ -214,42 +216,21 @@ impl CodexGui {
                     cx,
                 );
             }
-            BridgeEvent::UserMessage { thread_id, text } => {
-                if !text.is_empty() {
-                    self.append_message(&thread_id, Message::User(text), cx);
-                }
-            }
-            BridgeEvent::AgentMessageStarted {
-                thread_id,
-                item_id,
-                text,
-            } => {
-                self.append_message(
-                    &thread_id,
-                    Message::Assistant {
-                        id: item_id,
-                        body: text,
-                        state: StreamState::Streaming,
-                        tools: Vec::new(),
-                    },
-                    cx,
-                );
+            BridgeEvent::ItemStarted { thread_id, item } => {
+                self.apply_item_started(&thread_id, item, cx);
             }
             BridgeEvent::AgentMessageDelta {
                 thread_id,
                 item_id,
                 delta,
             } => self.append_agent_delta(&thread_id, &item_id, &delta, cx),
-            BridgeEvent::ToolStarted { thread_id, tool } => {
-                self.append_or_update_tool(&thread_id, tool, cx);
-            }
             BridgeEvent::ToolOutputDelta {
                 thread_id,
                 item_id,
                 delta,
             } => self.append_tool_output_delta(&thread_id, &item_id, &delta, cx),
-            BridgeEvent::ItemCompleted { thread_id, item_id } => {
-                self.mark_item_complete(&thread_id, &item_id, cx);
+            BridgeEvent::ItemCompleted { thread_id, item } => {
+                self.apply_item_completed(&thread_id, item, cx);
             }
             BridgeEvent::Error(message) => {
                 self.set_bridge_status("codex app-server error", cx);
@@ -257,21 +238,127 @@ impl CodexGui {
                     let thread_id = chat.read(cx).id.clone();
                     self.append_message(&thread_id, Message::Commentary(message), cx);
                 } else if let Some(project) = self.active_project_entity(cx) {
-                    let chat = chat_entity_from_model(
-                        Chat {
-                            id: "bridge-error".into(),
-                            title: "Bridge error".into(),
-                            subtitle: message.clone().into(),
-                            messages: vec![Message::Commentary(message)],
-                        },
-                        cx,
-                    );
+                    let chat = cx.new(|cx| {
+                        ChatState::new(
+                            "bridge-error".into(),
+                            "Bridge error".into(),
+                            message.clone().into(),
+                            vec![cx.new(|_| MessageState::new(Message::Commentary(message)))],
+                        )
+                    });
                     project.update(cx, |project, cx| {
                         project.chats.push(chat);
                         cx.notify();
                     });
                 }
             }
+        }
+    }
+
+    fn apply_item_started(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
+        match item {
+            ThreadItem::UserMessage { content, .. } => {
+                let text = user_input_text(&content);
+                if !text.is_empty() {
+                    self.append_message(thread_id, Message::User(text), cx);
+                }
+            }
+            ThreadItem::AgentMessage { id, text, .. } => {
+                self.append_message(
+                    thread_id,
+                    Message::Assistant {
+                        id,
+                        body: text,
+                        state: StreamState::Streaming,
+                        tools: Vec::new(),
+                    },
+                    cx,
+                );
+            }
+            ThreadItem::CommandExecution {
+                id, command, cwd, ..
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall {
+                        id,
+                        name: tool_name(&command, "command"),
+                        status: ToolStatus::Running,
+                        detail: cwd.display().to_string(),
+                    },
+                    cx,
+                );
+            }
+            ThreadItem::McpToolCall { id, tool, .. }
+            | ThreadItem::DynamicToolCall { id, tool, .. } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall {
+                        id,
+                        name: tool_name(&tool, "tool call"),
+                        status: ToolStatus::Running,
+                        detail: "tool call started".into(),
+                    },
+                    cx,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_item_completed(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
+        match item {
+            ThreadItem::CommandExecution {
+                id,
+                command,
+                cwd,
+                aggregated_output,
+                status,
+                ..
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall {
+                        id: id.clone(),
+                        name: tool_name(&command, "command"),
+                        status: tool_status_from_command(&status),
+                        detail: aggregated_output.unwrap_or_else(|| cwd.display().to_string()),
+                    },
+                    cx,
+                );
+                self.mark_item_complete(thread_id, &id, cx);
+            }
+            ThreadItem::McpToolCall {
+                id, tool, status, ..
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall {
+                        id: id.clone(),
+                        name: tool_name(&tool, "tool call"),
+                        status: tool_status_from_mcp(&status),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                self.mark_item_complete(thread_id, &id, cx);
+            }
+            ThreadItem::DynamicToolCall {
+                id, tool, status, ..
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall {
+                        id: id.clone(),
+                        name: tool_name(&tool, "tool call"),
+                        status: tool_status_from_dynamic(&status),
+                        detail: String::new(),
+                    },
+                    cx,
+                );
+                self.mark_item_complete(thread_id, &id, cx);
+            }
+            item => self.mark_item_complete(thread_id, item.id(), cx),
         }
     }
 
@@ -494,13 +581,144 @@ impl Render for CodexGui {
     }
 }
 
-fn chat_entity_from_model(chat: Chat, cx: &mut Context<CodexGui>) -> Entity<ChatState> {
-    let messages = chat
-        .messages
-        .into_iter()
-        .map(|message| cx.new(|_| MessageState::new(message)))
-        .collect();
-    cx.new(|_| ChatState::new(chat.id, chat.title, chat.subtitle, messages))
+fn chat_entity_from_thread(thread: Thread, cx: &mut Context<CodexGui>) -> Entity<ChatState> {
+    let title = thread
+        .name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .or_else(|| Some(thread.preview.as_str()))
+        .filter(|preview| !preview.is_empty())
+        .unwrap_or("Untitled Codex thread")
+        .to_string();
+    let subtitle = format!(
+        "{} - {}",
+        thread_status_label(&thread.status),
+        thread.cwd.display()
+    );
+    let thread_id = thread.id;
+    let mut messages = Vec::new();
+    for turn in thread.turns {
+        for item in turn.items {
+            append_thread_item(&mut messages, item, cx);
+        }
+    }
+    cx.new(|_| ChatState::new(thread_id, title.into(), subtitle.into(), messages))
+}
+
+fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
+    cx.new(|cx| {
+        ChatState::new(
+            "empty".into(),
+            "No Codex threads".into(),
+            "Click New to start one in this workspace".into(),
+            vec![cx.new(|_| {
+                MessageState::new(Message::Commentary(
+                    "No persisted Codex threads were returned for this workspace.".into(),
+                ))
+            })],
+        )
+    })
+}
+
+fn append_thread_item(
+    messages: &mut Vec<Entity<MessageState>>,
+    item: ThreadItem,
+    cx: &mut Context<CodexGui>,
+) {
+    match item {
+        ThreadItem::UserMessage { content, .. } => {
+            let text = user_input_text(&content);
+            if !text.is_empty() {
+                messages.push(cx.new(|_| MessageState::new(Message::User(text))));
+            }
+        }
+        ThreadItem::AgentMessage { id, text, .. } => {
+            messages.push(cx.new(|_| {
+                MessageState::new(Message::Assistant {
+                    id,
+                    body: text,
+                    state: StreamState::Complete,
+                    tools: Vec::new(),
+                })
+            }));
+        }
+        ThreadItem::CommandExecution {
+            id,
+            command,
+            cwd,
+            aggregated_output,
+            status,
+            ..
+        } => {
+            push_tool_to_messages(
+                messages,
+                ToolCall {
+                    id,
+                    name: tool_name(&command, "command"),
+                    status: tool_status_from_command(&status),
+                    detail: aggregated_output.unwrap_or_else(|| cwd.display().to_string()),
+                },
+                cx,
+            );
+        }
+        ThreadItem::McpToolCall {
+            id, tool, status, ..
+        } => {
+            push_tool_to_messages(
+                messages,
+                ToolCall {
+                    id,
+                    name: tool_name(&tool, "tool call"),
+                    status: tool_status_from_mcp(&status),
+                    detail: String::new(),
+                },
+                cx,
+            );
+        }
+        ThreadItem::DynamicToolCall {
+            id, tool, status, ..
+        } => {
+            push_tool_to_messages(
+                messages,
+                ToolCall {
+                    id,
+                    name: tool_name(&tool, "tool call"),
+                    status: tool_status_from_dynamic(&status),
+                    detail: String::new(),
+                },
+                cx,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn push_tool_to_messages(
+    messages: &mut Vec<Entity<MessageState>>,
+    tool: ToolCall,
+    cx: &mut Context<CodexGui>,
+) {
+    for message in messages.iter().rev() {
+        let is_assistant = matches!(&message.read(cx).message, Message::Assistant { .. });
+        if is_assistant {
+            message.update(cx, |message, cx| {
+                if let Message::Assistant { tools, .. } = &mut message.message {
+                    tools.push(tool);
+                    cx.notify();
+                }
+            });
+            return;
+        }
+    }
+
+    messages.push(cx.new(|_| {
+        MessageState::new(Message::Assistant {
+            id: format!("tool-group-{}", tool.id),
+            body: "Codex used a tool.".into(),
+            state: StreamState::Complete,
+            tools: vec![tool],
+        })
+    }));
 }
 
 fn upsert_chat(
@@ -517,4 +735,55 @@ fn upsert_chat(
         }
     }
     project.chats.insert(0, chat);
+}
+
+fn thread_status_label(status: &ThreadStatus) -> &'static str {
+    match status {
+        ThreadStatus::NotLoaded => "not loaded",
+        ThreadStatus::Idle => "idle",
+        ThreadStatus::SystemError => "system error",
+        ThreadStatus::Active { .. } => "active",
+    }
+}
+
+fn tool_status_from_command(status: &CommandExecutionStatus) -> ToolStatus {
+    match status {
+        CommandExecutionStatus::InProgress => ToolStatus::Running,
+        CommandExecutionStatus::Completed
+        | CommandExecutionStatus::Failed
+        | CommandExecutionStatus::Declined => ToolStatus::Done,
+    }
+}
+
+fn tool_status_from_mcp(status: &McpToolCallStatus) -> ToolStatus {
+    match status {
+        McpToolCallStatus::InProgress => ToolStatus::Running,
+        McpToolCallStatus::Completed | McpToolCallStatus::Failed => ToolStatus::Done,
+    }
+}
+
+fn tool_status_from_dynamic(status: &DynamicToolCallStatus) -> ToolStatus {
+    match status {
+        DynamicToolCallStatus::InProgress => ToolStatus::Running,
+        DynamicToolCallStatus::Completed | DynamicToolCallStatus::Failed => ToolStatus::Done,
+    }
+}
+
+fn tool_name(name: &str, fallback: &str) -> String {
+    if name.is_empty() {
+        fallback.into()
+    } else {
+        name.into()
+    }
+}
+
+fn user_input_text(content: &[UserInput]) -> String {
+    content
+        .iter()
+        .filter_map(|input| match input {
+            UserInput::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
