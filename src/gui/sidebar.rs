@@ -5,7 +5,7 @@ use crate::gui::{
 };
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
-    div, px,
+    div, prelude::*, px,
 };
 use gpui_component::{ActiveTheme as _, button::ButtonVariants as _, v_flex};
 
@@ -117,14 +117,23 @@ impl Render for Sidebar {
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
             .p_3()
-            .gap_4()
-            .child(section_label("Projects"))
-            .child(project_items)
-            .child(section_label("Codex Threads"))
-            .child(chat_items)
+            .gap_3()
             .child(
                 div()
-                    .mt_auto()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(section_label("Projects"))
+                    .child(project_items)
+                    .child(section_label("Codex Threads"))
+                    .child(chat_items),
+            )
+            .child(
+                div()
                     .flex()
                     .gap_2()
                     .child(

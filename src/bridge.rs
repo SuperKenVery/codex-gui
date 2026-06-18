@@ -3,8 +3,9 @@ use codex_app_server_protocol::{
     AskForApproval, ClientInfo, InitializeParams, InitializeResponse, JSONRPCError, JSONRPCMessage,
     JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, RequestId, SandboxMode,
     ServerNotification, Thread, ThreadForkParams, ThreadForkResponse, ThreadItem,
-    ThreadListCwdFilter, ThreadListParams, ThreadListResponse, ThreadSource, ThreadStartParams,
-    ThreadStartResponse, ThreadStatus, TurnStartParams, TurnStartResponse, UserInput,
+    ThreadListCwdFilter, ThreadListParams, ThreadListResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSource, ThreadStartParams, ThreadStartResponse, ThreadStatus,
+    TurnStartParams, TurnStartResponse, UserInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -19,6 +20,7 @@ use std::{
 
 pub enum BridgeCommand {
     StartThread { cwd: String },
+    ResumeThread { thread_id: String },
     SendTurn { thread_id: String, text: String },
     ForkThread { thread_id: String },
 }
@@ -27,6 +29,7 @@ pub enum BridgeEvent {
     Status(String),
     ThreadsLoaded(Vec<Thread>),
     ThreadStarted(Thread),
+    ThreadResumed(Thread),
     ThreadForked(Thread),
     TurnStarted {
         thread_id: String,
@@ -165,6 +168,16 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
                         approval_policy: Some(AskForApproval::OnRequest),
                         sandbox: Some(SandboxMode::WorkspaceWrite),
                         thread_source: Some(ThreadSource::User),
+                        ..Default::default()
+                    },
+                    &mut requests,
+                    &mut next_id,
+                    &mut stdin,
+                ),
+                BridgeCommand::ResumeThread { thread_id } => send_request(
+                    "thread/resume",
+                    ThreadResumeParams {
+                        thread_id,
                         ..Default::default()
                     },
                     &mut requests,
@@ -313,6 +326,13 @@ fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<Br
                 return;
             };
             let _ = event_tx.send(BridgeEvent::ThreadStarted(result.thread));
+        }
+        "thread/resume" => {
+            let Ok(result) = decode_result::<ThreadResumeResponse>(response.result, event_tx)
+            else {
+                return;
+            };
+            let _ = event_tx.send(BridgeEvent::ThreadResumed(result.thread));
         }
         "thread/fork" => {
             let Ok(result) = decode_result::<ThreadForkResponse>(response.result, event_tx) else {

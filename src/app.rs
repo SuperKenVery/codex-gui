@@ -91,10 +91,21 @@ impl CodexGui {
     }
 
     pub(crate) fn select_chat(&mut self, index: usize, cx: &mut Context<Self>) {
+        let thread_id = self.state.read(cx).active_project().and_then(|project| {
+            project
+                .read(cx)
+                .chats
+                .get(index)
+                .map(|chat| chat.read(cx).id.clone())
+        });
         self.state.update(cx, |state, cx| {
             state.active_chat = index;
             cx.notify();
         });
+        if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
+            self.send_bridge(BridgeCommand::ResumeThread { thread_id }, cx);
+            self.set_bridge_status("loading thread", cx);
+        }
     }
 
     pub(crate) fn fork_chat(&mut self, cx: &mut Context<Self>) {
@@ -207,6 +218,33 @@ impl CodexGui {
                     self.send_bridge(BridgeCommand::SendTurn { thread_id, text }, cx);
                     self.set_bridge_status("turn running", cx);
                 }
+            }
+            BridgeEvent::ThreadResumed(thread) => {
+                let thread_id = thread.id.clone();
+                let chat = chat_entity_from_thread(thread, cx);
+                if let Some(project) = self.active_project_entity(cx) {
+                    let should_keep_selected = self
+                        .active_chat_entity(cx)
+                        .map(|chat| chat.read(cx).id == thread_id)
+                        .unwrap_or(false);
+                    let loaded_chat_index = project.update(cx, |project, cx| {
+                        upsert_chat(project, chat, &thread_id, cx);
+                        let loaded_chat_index = project
+                            .chats
+                            .iter()
+                            .position(|chat| chat.read(cx).id == thread_id)
+                            .unwrap_or(0);
+                        cx.notify();
+                        loaded_chat_index
+                    });
+                    if should_keep_selected {
+                        self.state.update(cx, |state, cx| {
+                            state.active_chat = loaded_chat_index;
+                            cx.notify();
+                        });
+                    }
+                }
+                self.set_bridge_status("thread loaded", cx);
             }
             BridgeEvent::TurnStarted { thread_id } => {
                 self.set_bridge_status("turn running", cx);
