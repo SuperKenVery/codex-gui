@@ -1,5 +1,9 @@
-use crate::gui::{Message, StreamState, ToolCall, ToolStatus};
-use gpui::{IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
+use std::time::Duration;
+
+use crate::gui::{Message, MessageState, StreamState, ToolCall, ToolStatus};
+use gpui::{
+    App, ClickEvent, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+};
 use gpui_component::{
     Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -69,50 +73,104 @@ pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
 }
 
 pub(super) fn render_message(message: &Message, theme: &Theme) -> impl IntoElement {
+    render_message_view(message, false, false, false, theme, None)
+}
+
+pub(super) fn render_message_state(
+    message: &MessageState,
+    collapse_tools: bool,
+    hide_tools: bool,
+    active_tool_tail: bool,
+    theme: &Theme,
+    on_toggle_tools: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    render_message_view(
+        &message.message,
+        collapse_tools,
+        hide_tools,
+        active_tool_tail,
+        theme,
+        Some((message.tools_expanded, Box::new(on_toggle_tools))),
+    )
+}
+
+pub(super) fn render_worked_summary(duration: Duration, theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .py_1()
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .child(format!("Worked for {}", format_duration(duration)))
+}
+
+fn render_message_view(
+    message: &Message,
+    collapse_tools: bool,
+    hide_tools: bool,
+    active_tool_tail: bool,
+    theme: &Theme,
+    tool_toggle: Option<(
+        bool,
+        Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+    )>,
+) -> gpui::Div {
     match message {
-        Message::User(body) => message_card("YOU", body, theme.accent, None, theme),
-        Message::Commentary(body) => message_card("COMMENTARY", body, theme.secondary, None, theme),
+        Message::User(body) => message_block("You", body, theme, true),
+        Message::Commentary(body) => message_block("Commentary", body, theme, false),
         Message::Assistant {
             body, state, tools, ..
         } => {
-            let tool_list = tools
-                .iter()
-                .fold(div().flex().flex_col().gap_2(), |list, tool| {
-                    list.child(render_tool_call(tool, theme))
-                });
-            message_card(
+            let mut block = message_block(
                 match state {
-                    StreamState::Complete => "CODEX",
-                    StreamState::Streaming => "CODEX IS WORKING",
+                    StreamState::Complete => "Codex",
+                    StreamState::Streaming => "Codex is working",
                 },
                 body,
-                theme.background,
-                Some(tool_list),
                 theme,
-            )
+                false,
+            );
+
+            if !hide_tools && !tools.is_empty() {
+                let should_collapse = collapse_tools && !active_tool_tail;
+                let expanded = tool_toggle
+                    .as_ref()
+                    .map(|(expanded, _)| *expanded)
+                    .unwrap_or(false);
+                let tools_view = if should_collapse {
+                    let mut tool_group = div().flex().flex_col().gap_2();
+                    let summary = match tool_toggle {
+                        Some((_, on_toggle)) => render_tool_summary(tools, theme, expanded)
+                            .id(format!("tool-summary-{}", tools[0].id))
+                            .on_click(on_toggle)
+                            .into_any_element(),
+                        None => render_tool_summary(tools, theme, expanded).into_any_element(),
+                    };
+                    tool_group = tool_group.child(summary);
+                    if expanded {
+                        tool_group = tool_group.child(render_tool_list(tools, theme));
+                    }
+                    tool_group.into_any_element()
+                } else {
+                    render_tool_list(tools, theme).into_any_element()
+                };
+                block = block.child(tools_view);
+            }
+
+            block
         }
     }
 }
 
-fn message_card(
-    author: &'static str,
-    body: &str,
-    background: gpui::Hsla,
-    child: Option<gpui::Div>,
-    theme: &Theme,
-) -> impl IntoElement {
+fn message_block(author: &'static str, body: &str, theme: &Theme, is_user: bool) -> gpui::Div {
     div()
         .w_full()
         .min_w_0()
         .overflow_x_hidden()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .bg(background)
-        .p_4()
+        .py_2()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_2()
         .child(
             div()
                 .min_w_0()
@@ -127,13 +185,55 @@ fn message_card(
                 .overflow_x_hidden()
                 .text_sm()
                 .line_height(px(22.))
+                .font_weight(if is_user {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
                 .whitespace_normal()
                 .child(body.to_string()),
         )
-        .when_some(child, |this, child| this.child(child))
 }
 
-fn render_tool_call(tool: &ToolCall, theme: &Theme) -> impl IntoElement {
+fn render_tool_summary(tools: &[ToolCall], theme: &Theme, expanded: bool) -> gpui::Div {
+    let running = tools
+        .iter()
+        .filter(|tool| matches!(tool.status, ToolStatus::Running))
+        .count();
+    let label = if running > 0 {
+        format!(
+            "Running {} {}",
+            tools.len(),
+            pluralize(tools.len(), "tool call")
+        )
+    } else {
+        format!(
+            "Ran {} {}",
+            tools.len(),
+            pluralize(tools.len(), "tool call")
+        )
+    };
+
+    let indicator = if expanded { "^" } else { "v" };
+
+    div()
+        .w_full()
+        .min_w_0()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(theme.muted_foreground)
+        .child(format!("{label}  {indicator}"))
+}
+
+fn render_tool_list(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
+    tools
+        .iter()
+        .fold(div().flex().flex_col().gap_2(), |list, tool| {
+            list.child(render_tool_call(tool, theme))
+        })
+}
+
+fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
     let (label, color) = match tool.status {
         ToolStatus::Running => ("running", theme.warning_foreground),
         ToolStatus::Done => ("done", theme.success_foreground),
@@ -143,11 +243,7 @@ fn render_tool_call(tool: &ToolCall, theme: &Theme) -> impl IntoElement {
         .w_full()
         .min_w_0()
         .overflow_x_hidden()
-        .rounded_sm()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.secondary)
-        .p_3()
+        .py_1()
         .flex()
         .items_center()
         .justify_between()
@@ -176,14 +272,21 @@ fn render_tool_call(tool: &ToolCall, theme: &Theme) -> impl IntoElement {
                         .child(tool.detail.clone()),
                 ),
         )
-        .child(
-            div()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(color.opacity(0.18))
-                .text_color(color)
-                .text_xs()
-                .child(label),
-        )
+        .child(div().text_color(color).text_xs().child(label))
+}
+
+fn pluralize(count: usize, singular: &'static str) -> &'static str {
+    if count == 1 { singular } else { "tool calls" }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+
+    if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }

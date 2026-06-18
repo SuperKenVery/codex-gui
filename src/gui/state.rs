@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use gpui::{Entity, SharedString};
 
 pub struct GuiState {
@@ -57,11 +59,29 @@ impl ChatState {
 
 pub struct MessageState {
     pub message: Message,
+    pub created_at: Instant,
+    pub updated_at: Instant,
+    pub tools_expanded: bool,
 }
 
 impl MessageState {
     pub fn new(message: Message) -> Self {
-        Self { message }
+        let now = Instant::now();
+        Self {
+            message,
+            created_at: now,
+            updated_at: now,
+            tools_expanded: false,
+        }
+    }
+
+    pub fn touch(&mut self) {
+        self.updated_at = Instant::now();
+    }
+
+    pub fn toggle_tools(&mut self) {
+        self.tools_expanded = !self.tools_expanded;
+        self.touch();
     }
 }
 

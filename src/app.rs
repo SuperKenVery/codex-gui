@@ -247,12 +247,13 @@ impl CodexGui {
                 self.set_bridge_status("thread loaded", cx);
             }
             BridgeEvent::TurnStarted { thread_id } => {
+                let _ = thread_id;
                 self.set_bridge_status("turn running", cx);
-                self.append_message(
-                    &thread_id,
-                    Message::Commentary("Codex accepted the turn.".into()),
-                    cx,
-                );
+                // self.append_message(
+                //     &thread_id,
+                //     Message::Commentary("Codex accepted the turn.".into()),
+                //     cx,
+                // );
             }
             BridgeEvent::ItemStarted { thread_id, item } => {
                 self.apply_item_started(&thread_id, item, cx);
@@ -466,6 +467,7 @@ impl CodexGui {
             if let Message::Assistant { body, state, .. } = &mut message.message {
                 body.push_str(delta);
                 *state = StreamState::Streaming;
+                message.touch();
                 cx.notify();
             }
         });
@@ -481,6 +483,7 @@ impl CodexGui {
                     } else {
                         tools.push(tool);
                     }
+                    message.touch();
                     cx.notify();
                 }
             });
@@ -512,6 +515,7 @@ impl CodexGui {
             if let Message::Assistant { tools, .. } = &mut message.message {
                 if let Some(tool) = tools.iter_mut().find(|tool| tool.id == item_id) {
                     tool.detail.push_str(delta);
+                    message.touch();
                     cx.notify();
                 }
             }
@@ -523,6 +527,7 @@ impl CodexGui {
             message.update(cx, |message, cx| {
                 if let Message::Assistant { state, .. } = &mut message.message {
                     *state = StreamState::Complete;
+                    message.touch();
                     cx.notify();
                 }
             });
@@ -534,6 +539,7 @@ impl CodexGui {
                 if let Message::Assistant { tools, .. } = &mut message.message {
                     if let Some(tool) = tools.iter_mut().find(|tool| tool.id == item_id) {
                         tool.status = ToolStatus::Done;
+                        message.touch();
                         cx.notify();
                     }
                 }
