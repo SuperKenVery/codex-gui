@@ -197,19 +197,19 @@ impl CodexGui {
     }
 
     pub(crate) fn send_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
-        let Some(thread_id) = self
+        let active_thread_id = self
             .active_chat_entity(cx)
             .map(|chat| chat.read(cx).id.clone())
-        else {
-            self.pending_turn_text = Some(text);
-            self.start_thread(cx);
-            return;
-        };
-        if thread_id == "empty" {
+            .filter(|thread_id| thread_id != "empty");
+        let new_chat_open = self.ui_state.read(cx).new_chat_open;
+        if should_start_thread_for_turn(new_chat_open, active_thread_id.as_deref()) {
             self.pending_turn_text = Some(text);
             self.start_thread(cx);
             return;
         }
+        let Some(thread_id) = active_thread_id else {
+            return;
+        };
         let settings = self.state.read(cx).chat_settings.clone();
         self.send_bridge(
             BridgeCommand::SendTurn {
@@ -286,6 +286,9 @@ impl CodexGui {
     }
 
     fn update_active_thread_settings(&mut self, cx: &mut Context<Self>) {
+        if self.ui_state.read(cx).new_chat_open {
+            return;
+        }
         let Some(thread_id) = self
             .active_chat_entity(cx)
             .map(|chat| chat.read(cx).id.clone())
@@ -1046,4 +1049,34 @@ fn user_input_text(content: &[UserInput]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn should_start_thread_for_turn(new_chat_open: bool, active_thread_id: Option<&str>) -> bool {
+    new_chat_open || active_thread_id.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_chat_turn_starts_thread_even_when_an_active_thread_exists() {
+        assert!(should_start_thread_for_turn(
+            true,
+            Some("existing-thread-id")
+        ));
+    }
+
+    #[test]
+    fn existing_chat_turn_reuses_active_thread() {
+        assert!(!should_start_thread_for_turn(
+            false,
+            Some("existing-thread-id")
+        ));
+    }
+
+    #[test]
+    fn missing_active_chat_starts_thread() {
+        assert!(should_start_thread_for_turn(false, None));
+    }
 }

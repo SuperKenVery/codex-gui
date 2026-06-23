@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::gui::{Message, MessageState, StreamState, ToolCall, ToolStatus};
 use gpui::{
     App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
-    prelude::*, px,
+    prelude::*, px, rems,
 };
 use gpui_component::{
     Selectable as _, Sizable as _,
@@ -13,6 +13,10 @@ use gpui_component::{
     text::{TextView, TextViewState, markdown},
     theme::Theme,
     v_flex,
+};
+use zed_markdown::{
+    Markdown as ZedMarkdown, MarkdownElement as ZedMarkdownElement,
+    MarkdownStyle as ZedMarkdownStyle,
 };
 
 const LARGE_MARKDOWN_BODY_BYTES: usize = 12 * 1024;
@@ -65,7 +69,7 @@ pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
 }
 
 pub(super) fn render_message(message: &Message, theme: &Theme) -> impl IntoElement {
-    render_message_view(message, None, false, false, false, theme, None)
+    render_message_view(message, None, false, false, false, theme, None, None)
 }
 
 pub(super) fn render_message_state(
@@ -74,6 +78,7 @@ pub(super) fn render_message_state(
     hide_tools: bool,
     active_tool_tail: bool,
     theme: &Theme,
+    window: &mut Window,
     on_toggle_tools: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     render_message_view(
@@ -84,6 +89,7 @@ pub(super) fn render_message_state(
         active_tool_tail,
         theme,
         Some((message.tools_expanded, Box::new(on_toggle_tools))),
+        Some((message.zed_markdown.as_ref(), window)),
     )
 }
 
@@ -108,15 +114,19 @@ fn render_message_view(
         bool,
         Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
     )>,
+    zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
     match message {
-        Message::User(body) => message_block("You", body, None, theme, MessageBodyFormat::Plain),
+        Message::User(body) => {
+            message_block("You", body, None, theme, MessageBodyFormat::Plain, None)
+        }
         Message::Commentary(body) => message_block(
             "Commentary",
             body,
             body_view,
             theme,
             MessageBodyFormat::Markdown,
+            zed_markdown,
         ),
         Message::Assistant {
             body, state, tools, ..
@@ -130,6 +140,7 @@ fn render_message_view(
                 body_view,
                 theme,
                 MessageBodyFormat::Markdown,
+                zed_markdown,
             );
 
             if !hide_tools && !tools.is_empty() {
@@ -174,6 +185,7 @@ fn message_block(
     body_view: Option<&Entity<TextViewState>>,
     theme: &Theme,
     body_format: MessageBodyFormat,
+    zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
     let body = match body_format {
         MessageBodyFormat::Plain => div()
@@ -185,19 +197,24 @@ fn message_block(
             .into_any_element(),
         MessageBodyFormat::Markdown => {
             let is_large_body = body.len() >= LARGE_MARKDOWN_BODY_BYTES;
-            body_view
-                .map(TextView::new)
-                .unwrap_or_else(|| markdown(body.to_string()))
-                .selectable(true)
-                .code_block_actions(|code_block, _, _| {
-                    h_flex()
-                        .gap_1()
-                        .child(Clipboard::new("copy-code").value(code_block.code().clone()))
-                })
-                .when(is_large_body, |view| {
-                    view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
-                })
-                .into_any_element()
+            if let Some((Some(markdown), window)) = zed_markdown {
+                ZedMarkdownElement::new(markdown.clone(), zed_markdown_style(window, theme))
+                    .into_any_element()
+            } else {
+                body_view
+                    .map(TextView::new)
+                    .unwrap_or_else(|| markdown(body.to_string()))
+                    .selectable(true)
+                    .code_block_actions(|code_block, _, _| {
+                        h_flex()
+                            .gap_1()
+                            .child(Clipboard::new("copy-code").value(code_block.code().clone()))
+                    })
+                    .when(is_large_body, |view| {
+                        view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
+                    })
+                    .into_any_element()
+            }
         }
     };
 
@@ -217,6 +234,20 @@ fn message_block(
                 .child(author),
         )
         .child(div().w_full().min_w_0().overflow_x_hidden().child(body))
+}
+
+fn zed_markdown_style(window: &Window, theme: &Theme) -> ZedMarkdownStyle {
+    let mut style = ZedMarkdownStyle::default();
+    let mut text_style = window.text_style();
+    text_style.refine(&gpui::TextStyleRefinement {
+        font_size: Some(rems(0.875).into()),
+        line_height: Some(px(22.).into()),
+        color: Some(theme.foreground),
+        ..Default::default()
+    });
+    style.base_text_style = text_style;
+    style.code_block_overflow_x_scroll = true;
+    style
 }
 
 fn render_tool_summary(tools: &[ToolCall], theme: &Theme, expanded: bool) -> gpui::Div {

@@ -107,13 +107,14 @@ impl Render for ChatHistory {
 }
 
 impl Render for MessageState {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         render_message_state(
             self,
             self.collapse_tools,
             self.hide_tools,
             self.active_tool_tail,
             cx.theme(),
+            window,
             cx.listener(|message, _, _, cx| {
                 message.toggle_tools();
                 cx.notify();

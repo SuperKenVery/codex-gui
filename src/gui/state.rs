@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use gpui::{AppContext, Context, Entity, SharedString};
 use gpui_component::text::TextViewState;
+use zed_markdown::Markdown as ZedMarkdown;
 
 pub struct GuiState {
     pub projects: Vec<Entity<ProjectState>>,
@@ -174,6 +175,7 @@ pub struct MessageState {
     pub updated_at: Instant,
     pub tools_expanded: bool,
     pub body_view: Option<Entity<TextViewState>>,
+    pub zed_markdown: Option<Entity<ZedMarkdown>>,
     pub collapse_tools: bool,
     pub hide_tools: bool,
     pub active_tool_tail: bool,
@@ -184,12 +186,15 @@ impl MessageState {
         let now = Instant::now();
         let body_view =
             markdown_body(&message).map(|body| cx.new(|cx| TextViewState::markdown(body, cx)));
+        let zed_markdown = markdown_body(&message)
+            .map(|body| cx.new(|cx| ZedMarkdown::new(body.into(), None, None, cx)));
         Self {
             message,
             created_at: now,
             updated_at: now,
             tools_expanded: false,
             body_view,
+            zed_markdown,
             collapse_tools: true,
             hide_tools: false,
             active_tool_tail: false,
@@ -213,9 +218,16 @@ impl MessageState {
                 } else {
                     self.body_view = Some(cx.new(|cx| TextViewState::markdown(body, cx)));
                 }
+                if let Some(zed_markdown) = &self.zed_markdown {
+                    zed_markdown.update(cx, |markdown, cx| markdown.replace(body.to_string(), cx));
+                } else {
+                    self.zed_markdown =
+                        Some(cx.new(|cx| ZedMarkdown::new(body.into(), None, None, cx)));
+                }
             }
             None => {
                 self.body_view = None;
+                self.zed_markdown = None;
             }
         }
     }
@@ -232,9 +244,16 @@ impl MessageState {
                 } else {
                     self.body_view = Some(cx.new(|cx| TextViewState::markdown(body, cx)));
                 }
+                if let Some(zed_markdown) = &self.zed_markdown {
+                    zed_markdown.update(cx, |markdown, cx| markdown.append(delta, cx));
+                } else {
+                    self.zed_markdown =
+                        Some(cx.new(|cx| ZedMarkdown::new(body.into(), None, None, cx)));
+                }
             }
             None => {
                 self.body_view = None;
+                self.zed_markdown = None;
             }
         }
     }
