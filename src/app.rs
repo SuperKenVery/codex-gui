@@ -1,13 +1,13 @@
-use crate::bridge::{BridgeCommand, BridgeEvent, start_app_server_bridge};
+use crate::bridge::{AppServerBridge, BridgeError, BridgeEvent, start_app_server_bridge};
 use crate::gui::{
-    ActiveTurn, ApprovalReviewerMode, AssistantPhase, BridgeState, ChatPanel, ChatState, GuiState,
-    Message, MessageState, ProjectState, SideChat, Sidebar, StreamState, ToolCall, ToolStatus,
-    UiState,
+    ActiveTurn, ApprovalReviewerMode, AssistantPhase, BridgeState, ChatPanel, ChatSettings,
+    ChatState, GuiState, Message, MessageState, ModelOption, PermissionProfileOption, ProjectState,
+    SideChat, Sidebar, StreamState, ToolCall, ToolStatus, UiState,
 };
 use crate::workspace::workspace_path;
 use codex_app_server_protocol::{
-    CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, Thread, ThreadItem,
-    ThreadStatus, UserInput,
+    CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, ServerNotification, Thread,
+    ThreadItem, ThreadStatus, UserInput,
 };
 use codex_protocol::models::MessagePhase;
 use gpui::{
@@ -15,17 +15,13 @@ use gpui::{
     prelude::*, transparent_black,
 };
 use gpui_component::ActiveTheme as _;
-use std::{
-    path::Path,
-    sync::mpsc::{Receiver, Sender},
-    time::Duration,
-};
+use std::{path::Path, sync::mpsc::Receiver, time::Duration};
 
 pub struct CodexGui {
     state: Entity<GuiState>,
     ui_state: Entity<UiState>,
     bridge_state: Entity<BridgeState>,
-    bridge_tx: Option<Sender<BridgeCommand>>,
+    bridge: AppServerBridge,
     bridge_rx: Receiver<BridgeEvent>,
     pending_turn_text: Option<String>,
     sidebar: Entity<Sidebar>,
@@ -37,7 +33,7 @@ pub struct CodexGui {
 
 impl CodexGui {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (bridge_tx, bridge_rx) = start_app_server_bridge();
+        let (bridge, bridge_rx) = start_app_server_bridge();
         let initial_project =
             cx.new(|_| ProjectState::new("codex-gui".into(), workspace_path().into(), Vec::new()));
         let state = cx.new(|_| GuiState::new(vec![initial_project]));
@@ -71,11 +67,59 @@ impl CodexGui {
             }
         });
 
+        let initialize_bridge = bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { initialize_bridge.initialize().await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_initialize_result(result, cx));
+        })
+        .detach();
+
+        let models_bridge = bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { models_bridge.list_models().await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_models_result(result, cx));
+        })
+        .detach();
+
+        let profiles_bridge = bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    profiles_bridge
+                        .list_permission_profiles(workspace_path())
+                        .await
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.apply_permission_profiles_result(result, cx)
+            });
+        })
+        .detach();
+
+        let threads_bridge = bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let cwd = workspace_path();
+                    threads_bridge
+                        .list_threads(cwd.clone())
+                        .await
+                        .map(|threads| (cwd, threads))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_threads_result(result, cx));
+        })
+        .detach();
+
         Self {
             state,
             ui_state,
             bridge_state,
-            bridge_tx: Some(bridge_tx),
+            bridge,
             bridge_rx,
             pending_turn_text: None,
             sidebar,
@@ -107,7 +151,7 @@ impl CodexGui {
         });
         if should_load_threads {
             if let Some(cwd) = cwd {
-                self.send_bridge(BridgeCommand::ListThreads { cwd }, cx);
+                self.load_threads(cwd, cx);
                 self.set_bridge_status("loading project threads", cx);
             }
         }
@@ -172,7 +216,7 @@ impl CodexGui {
             cx.notify();
         });
         if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
-            self.send_bridge(BridgeCommand::ResumeThread { thread_id }, cx);
+            self.resume_thread(thread_id, cx);
             self.set_bridge_status("loading thread", cx);
         }
     }
@@ -184,7 +228,7 @@ impl CodexGui {
         else {
             return;
         };
-        self.send_bridge(BridgeCommand::ForkThread { thread_id }, cx);
+        self.fork_thread(thread_id, cx);
         self.set_bridge_status("forking thread", cx);
     }
 
@@ -194,7 +238,7 @@ impl CodexGui {
             .active_project_entity(cx)
             .map(|project| project.read(cx).path.to_string())
             .unwrap_or_else(workspace_path);
-        self.send_bridge(BridgeCommand::StartThread { cwd, settings }, cx);
+        self.start_thread_request(cwd, settings, cx);
         self.set_bridge_status("starting thread", cx);
     }
 
@@ -216,14 +260,7 @@ impl CodexGui {
             return;
         };
         let settings = self.state.read(cx).chat_settings.clone();
-        self.send_bridge(
-            BridgeCommand::SendTurn {
-                thread_id,
-                text,
-                settings,
-            },
-            cx,
-        );
+        self.send_turn_request(thread_id, text, settings, cx);
         self.set_bridge_status("turn running", cx);
     }
 
@@ -238,14 +275,7 @@ impl CodexGui {
         else {
             return;
         };
-        self.send_bridge(
-            BridgeCommand::SteerTurn {
-                thread_id: active_thread_id,
-                turn_id: active_turn.turn_id,
-                text,
-            },
-            cx,
-        );
+        self.steer_turn_request(active_thread_id, active_turn.turn_id, text, cx);
         self.set_bridge_status("steer sent", cx);
     }
 
@@ -253,13 +283,7 @@ impl CodexGui {
         let Some(active_turn) = self.ui_state.read(cx).active_turn.clone() else {
             return;
         };
-        self.send_bridge(
-            BridgeCommand::InterruptTurn {
-                thread_id: active_turn.thread_id,
-                turn_id: active_turn.turn_id,
-            },
-            cx,
-        );
+        self.interrupt_turn_request(active_turn.thread_id, active_turn.turn_id, cx);
         self.set_bridge_status("stopping turn", cx);
     }
 
@@ -318,14 +342,6 @@ impl CodexGui {
         cx.notify();
     }
 
-    fn send_bridge(&mut self, command: BridgeCommand, cx: &mut Context<Self>) {
-        if let Some(tx) = &self.bridge_tx {
-            if tx.send(command).is_err() {
-                self.set_bridge_status("codex app-server writer stopped", cx);
-            }
-        }
-    }
-
     fn update_active_thread_settings(&mut self, cx: &mut Context<Self>) {
         if self.ui_state.read(cx).new_chat_open {
             return;
@@ -338,14 +354,124 @@ impl CodexGui {
             return;
         };
         let settings = self.state.read(cx).chat_settings.clone();
-        self.send_bridge(
-            BridgeCommand::UpdateThreadSettings {
-                thread_id,
-                settings,
-            },
-            cx,
-        );
+        self.update_thread_settings_request(thread_id, settings, cx);
         self.set_bridge_status("updating settings", cx);
+    }
+
+    fn load_threads(&self, cwd: String, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    bridge
+                        .list_threads(cwd.clone())
+                        .await
+                        .map(|threads| (cwd, threads))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_threads_result(result, cx));
+        })
+        .detach();
+    }
+
+    fn start_thread_request(&self, cwd: String, settings: ChatSettings, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.start_thread(cwd, settings).await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
+        })
+        .detach();
+    }
+
+    fn resume_thread(&self, thread_id: String, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.resume_thread(thread_id).await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+        })
+        .detach();
+    }
+
+    fn fork_thread(&self, thread_id: String, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.fork_thread(thread_id).await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
+        })
+        .detach();
+    }
+
+    fn send_turn_request(
+        &self,
+        thread_id: String,
+        text: String,
+        settings: ChatSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.send_turn(thread_id, text, settings).await })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.apply_unit_result(result.map(|_| ()), cx)
+            });
+        })
+        .detach();
+    }
+
+    fn steer_turn_request(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.steer_turn(thread_id, turn_id, text).await })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.apply_unit_result(result.map(|_| ()), cx)
+            });
+        })
+        .detach();
+    }
+
+    fn interrupt_turn_request(&self, thread_id: String, turn_id: String, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.interrupt_turn(thread_id, turn_id).await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
+    }
+
+    fn update_thread_settings_request(
+        &self,
+        thread_id: String,
+        settings: ChatSettings,
+        cx: &mut Context<Self>,
+    ) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    bridge.update_thread_settings(thread_id, settings).await
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
     }
 
     fn set_bridge_status(&self, status: impl Into<String>, cx: &mut Context<Self>) {
@@ -355,59 +481,82 @@ impl CodexGui {
         });
     }
 
-    fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
-        while let Ok(event) = self.bridge_rx.try_recv() {
-            self.apply_bridge_event(event, cx);
+    fn apply_initialize_result(
+        &mut self,
+        result: Result<codex_app_server_protocol::InitializeResponse, BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(response) => {
+                self.set_bridge_status(format!("connected: {}", response.user_agent), cx)
+            }
+            Err(err) => self.apply_bridge_error(err.to_string(), cx),
         }
     }
 
-    fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
-        match event {
-            BridgeEvent::Status(status) => self.set_bridge_status(status, cx),
-            BridgeEvent::ThreadsLoaded { cwd, threads } => {
-                let chats = if threads.is_empty() {
-                    vec![empty_chat_entity(cx)]
-                } else {
-                    threads
-                        .into_iter()
-                        .map(|thread| chat_entity_from_thread(thread, cx))
-                        .collect::<Vec<_>>()
-                };
-                let default_thread_id = chats
-                    .first()
-                    .map(|chat| chat.read(cx).id.clone())
-                    .filter(|thread_id| thread_id != "empty");
-                let project_index = self
-                    .state
-                    .read(cx)
-                    .projects
-                    .iter()
-                    .position(|project| project.read(cx).path.as_ref() == cwd);
-                if let Some(project_index) = project_index {
-                    let project = self.state.read(cx).projects[project_index].clone();
-                    project.update(cx, |project, cx| {
-                        project.chats = chats;
-                        project.threads_loaded = true;
-                        cx.notify();
-                    });
-                    if project_index == self.state.read(cx).active_project {
-                        self.state.update(cx, |state, cx| {
-                            state.active_chat = 0;
-                            cx.notify();
-                        });
-                    }
-                }
-                self.set_bridge_status("connected to codex app-server", cx);
-                let can_resume_default = !self.ui_state.read(cx).new_chat_open
-                    && project_index == Some(self.state.read(cx).active_project);
-                if can_resume_default {
-                    if let Some(thread_id) = default_thread_id {
-                        self.send_bridge(BridgeCommand::ResumeThread { thread_id }, cx);
-                        self.set_bridge_status("loading thread", cx);
-                    }
-                }
+    fn apply_threads_result(
+        &mut self,
+        result: Result<(String, Vec<Thread>), BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        let (cwd, threads) = match result {
+            Ok(result) => result,
+            Err(err) => {
+                self.apply_bridge_error(err.to_string(), cx);
+                return;
             }
-            BridgeEvent::ModelsLoaded(models) => {
+        };
+
+        let chats = if threads.is_empty() {
+            vec![empty_chat_entity(cx)]
+        } else {
+            threads
+                .into_iter()
+                .map(|thread| chat_entity_from_thread(thread, cx))
+                .collect::<Vec<_>>()
+        };
+        let default_thread_id = chats
+            .first()
+            .map(|chat| chat.read(cx).id.clone())
+            .filter(|thread_id| thread_id != "empty");
+        let project_index = self
+            .state
+            .read(cx)
+            .projects
+            .iter()
+            .position(|project| project.read(cx).path.as_ref() == cwd);
+        if let Some(project_index) = project_index {
+            let project = self.state.read(cx).projects[project_index].clone();
+            project.update(cx, |project, cx| {
+                project.chats = chats;
+                project.threads_loaded = true;
+                cx.notify();
+            });
+            if project_index == self.state.read(cx).active_project {
+                self.state.update(cx, |state, cx| {
+                    state.active_chat = 0;
+                    cx.notify();
+                });
+            }
+        }
+        self.set_bridge_status("connected to codex app-server", cx);
+        let can_resume_default = !self.ui_state.read(cx).new_chat_open
+            && project_index == Some(self.state.read(cx).active_project);
+        if can_resume_default {
+            if let Some(thread_id) = default_thread_id {
+                self.resume_thread(thread_id, cx);
+                self.set_bridge_status("loading thread", cx);
+            }
+        }
+    }
+
+    fn apply_models_result(
+        &mut self,
+        result: Result<Vec<ModelOption>, BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(models) => {
                 self.state.update(cx, |state, cx| {
                     if let Some(default_model) = models
                         .first()
@@ -420,107 +569,121 @@ impl CodexGui {
                     cx.notify();
                 });
             }
-            BridgeEvent::PermissionProfilesLoaded(profiles) => {
+            Err(err) => self.apply_bridge_error(err.to_string(), cx),
+        }
+    }
+
+    fn apply_permission_profiles_result(
+        &mut self,
+        result: Result<Vec<PermissionProfileOption>, BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(profiles) => {
                 self.state.update(cx, |state, cx| {
                     state.permission_profiles = profiles;
                     cx.notify();
                 });
             }
-            BridgeEvent::ThreadStarted(thread) | BridgeEvent::ThreadForked(thread) => {
-                let thread_id = thread.id.clone();
-                let chat = chat_entity_from_thread(thread, cx);
-                if let Some(project) = self.active_project_entity(cx) {
-                    project.update(cx, |project, cx| {
-                        upsert_chat(project, chat, &thread_id, cx);
-                        cx.notify();
-                    });
+            Err(err) => self.apply_bridge_error(err.to_string(), cx),
+        }
+    }
+
+    fn apply_thread_started_result(
+        &mut self,
+        result: Result<Thread, BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(thread) => self.apply_thread_started(thread, cx),
+            Err(err) => self.apply_bridge_error(err.to_string(), cx),
+        }
+    }
+
+    fn apply_thread_resumed_result(
+        &mut self,
+        result: Result<Thread, BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(thread) => self.apply_thread_resumed(thread, cx),
+            Err(err) => self.apply_bridge_error(err.to_string(), cx),
+        }
+    }
+
+    fn apply_unit_result(&mut self, result: Result<(), BridgeError>, cx: &mut Context<Self>) {
+        if let Err(err) = result {
+            self.apply_bridge_error(err.to_string(), cx);
+        }
+    }
+
+    fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
+        while let Ok(event) = self.bridge_rx.try_recv() {
+            self.apply_bridge_event(event, cx);
+        }
+    }
+
+    fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
+        match event {
+            BridgeEvent::Notification(notification) => {
+                self.apply_server_notification(notification, cx)
+            }
+            BridgeEvent::RpcError(error) => self.apply_bridge_error(error.error.message, cx),
+            BridgeEvent::TransportError(message) => self.apply_bridge_error(message, cx),
+            BridgeEvent::Stderr(status) => self.set_bridge_status(status, cx),
+        }
+    }
+
+    fn apply_server_notification(
+        &mut self,
+        notification: ServerNotification,
+        cx: &mut Context<Self>,
+    ) {
+        match notification {
+            ServerNotification::ThreadStarted(params) => {
+                self.apply_thread_started(params.thread, cx);
+            }
+            ServerNotification::ThreadNameUpdated(params) => {
+                if let Some(thread_name) = params.thread_name.filter(|name| !name.is_empty()) {
+                    self.update_chat_title(&params.thread_id, thread_name, cx);
                 }
-                self.state.update(cx, |state, cx| {
-                    state.active_chat = 0;
-                    cx.notify();
-                });
+            }
+            ServerNotification::TurnStarted(params) => {
                 self.ui_state.update(cx, |state, cx| {
-                    state.new_chat_open = false;
-                    cx.notify();
-                });
-                self.set_bridge_status("thread ready", cx);
-                if let Some(text) = self.pending_turn_text.take() {
-                    let settings = self.state.read(cx).chat_settings.clone();
-                    self.send_bridge(
-                        BridgeCommand::SendTurn {
-                            thread_id,
-                            text,
-                            settings,
-                        },
-                        cx,
-                    );
-                    self.set_bridge_status("turn running", cx);
-                }
-            }
-            BridgeEvent::ThreadNameUpdated {
-                thread_id,
-                thread_name,
-            } => {
-                if let Some(thread_name) = thread_name.filter(|name| !name.is_empty()) {
-                    self.update_chat_title(&thread_id, thread_name, cx);
-                }
-            }
-            BridgeEvent::ThreadResumed(thread) => {
-                let thread_id = thread.id.clone();
-                let chat = chat_entity_from_thread(thread, cx);
-                if let Some(project) = self.active_project_entity(cx) {
-                    let should_keep_selected = self
-                        .active_chat_entity(cx)
-                        .map(|chat| chat.read(cx).id == thread_id)
-                        .unwrap_or(false);
-                    let loaded_chat_index = project.update(cx, |project, cx| {
-                        upsert_chat(project, chat, &thread_id, cx);
-                        let loaded_chat_index = project
-                            .chats
-                            .iter()
-                            .position(|chat| chat.read(cx).id == thread_id)
-                            .unwrap_or(0);
-                        cx.notify();
-                        loaded_chat_index
+                    state.active_turn = Some(ActiveTurn {
+                        thread_id: params.thread_id,
+                        turn_id: params.turn.id,
                     });
-                    if should_keep_selected {
-                        self.state.update(cx, |state, cx| {
-                            state.active_chat = loaded_chat_index;
-                            cx.notify();
-                        });
-                    }
-                }
-                self.set_bridge_status("thread loaded", cx);
-            }
-            BridgeEvent::TurnStarted { thread_id, turn_id } => {
-                self.ui_state.update(cx, |state, cx| {
-                    state.active_turn = Some(ActiveTurn { thread_id, turn_id });
                     cx.notify();
                 });
                 self.set_bridge_status("turn running", cx);
-                // self.append_message(
-                //     &thread_id,
-                //     Message::Commentary("Codex accepted the turn.".into()),
-                //     cx,
-                // );
             }
-            BridgeEvent::ItemStarted { thread_id, item } => {
-                self.apply_item_started(&thread_id, item, cx);
+            ServerNotification::ItemStarted(params) => {
+                self.apply_item_started(&params.thread_id, params.item, cx);
             }
-            BridgeEvent::AgentMessageDelta {
-                thread_id,
-                item_id,
-                delta,
-            } => self.append_agent_delta(&thread_id, &item_id, &delta, cx),
-            BridgeEvent::ToolOutputDelta {
-                thread_id,
-                item_id,
-                delta,
-            } => self.append_tool_output_delta(&thread_id, &item_id, &delta, cx),
-            BridgeEvent::ItemCompleted { thread_id, item } => {
-                self.apply_item_completed(&thread_id, item, cx);
+            ServerNotification::AgentMessageDelta(params) => {
+                self.append_agent_delta(&params.thread_id, &params.item_id, &params.delta, cx);
             }
-            BridgeEvent::TurnCompleted { thread_id, turn_id } => {
+            ServerNotification::CommandExecutionOutputDelta(params) => {
+                self.append_tool_output_delta(
+                    &params.thread_id,
+                    &params.item_id,
+                    &params.delta,
+                    cx,
+                );
+            }
+            ServerNotification::ItemCompleted(params) => {
+                self.apply_item_completed(&params.thread_id, params.item, cx);
+            }
+            ServerNotification::ThreadStatusChanged(params) => {
+                self.set_bridge_status(
+                    format!("thread {}", thread_status_label(&params.status)),
+                    cx,
+                );
+            }
+            ServerNotification::TurnCompleted(params) => {
+                let thread_id = params.thread_id;
+                let turn_id = params.turn.id;
                 self.ui_state.update(cx, |state, cx| {
                     if state.active_turn.as_ref().is_some_and(|active_turn| {
                         active_turn.thread_id == thread_id && active_turn.turn_id == turn_id
@@ -530,31 +693,90 @@ impl CodexGui {
                     }
                 });
                 self.finish_completed_tool_messages(&thread_id, cx);
+                self.set_bridge_status("turn complete", cx);
             }
-            BridgeEvent::Error(message) => {
-                self.ui_state.update(cx, |state, cx| {
-                    state.active_turn = None;
+            ServerNotification::Error(params) => {
+                self.apply_bridge_error(params.error.message, cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_thread_started(&mut self, thread: Thread, cx: &mut Context<Self>) {
+        let thread_id = thread.id.clone();
+        let chat = chat_entity_from_thread(thread, cx);
+        if let Some(project) = self.active_project_entity(cx) {
+            project.update(cx, |project, cx| {
+                upsert_chat(project, chat, &thread_id, cx);
+                cx.notify();
+            });
+        }
+        self.state.update(cx, |state, cx| {
+            state.active_chat = 0;
+            cx.notify();
+        });
+        self.ui_state.update(cx, |state, cx| {
+            state.new_chat_open = false;
+            cx.notify();
+        });
+        self.set_bridge_status("thread ready", cx);
+        if let Some(text) = self.pending_turn_text.take() {
+            let settings = self.state.read(cx).chat_settings.clone();
+            self.send_turn_request(thread_id, text, settings, cx);
+            self.set_bridge_status("turn running", cx);
+        }
+    }
+
+    fn apply_thread_resumed(&mut self, thread: Thread, cx: &mut Context<Self>) {
+        let thread_id = thread.id.clone();
+        let chat = chat_entity_from_thread(thread, cx);
+        if let Some(project) = self.active_project_entity(cx) {
+            let should_keep_selected = self
+                .active_chat_entity(cx)
+                .map(|chat| chat.read(cx).id == thread_id)
+                .unwrap_or(false);
+            let loaded_chat_index = project.update(cx, |project, cx| {
+                upsert_chat(project, chat, &thread_id, cx);
+                let loaded_chat_index = project
+                    .chats
+                    .iter()
+                    .position(|chat| chat.read(cx).id == thread_id)
+                    .unwrap_or(0);
+                cx.notify();
+                loaded_chat_index
+            });
+            if should_keep_selected {
+                self.state.update(cx, |state, cx| {
+                    state.active_chat = loaded_chat_index;
                     cx.notify();
                 });
-                self.set_bridge_status("codex app-server error", cx);
-                if let Some(chat) = self.active_chat_entity(cx) {
-                    let thread_id = chat.read(cx).id.clone();
-                    self.append_message(&thread_id, Message::Commentary(message), cx);
-                } else if let Some(project) = self.active_project_entity(cx) {
-                    let chat = cx.new(|cx| {
-                        ChatState::new(
-                            "bridge-error".into(),
-                            "Bridge error".into(),
-                            message.clone().into(),
-                            vec![cx.new(|cx| MessageState::new(Message::Commentary(message), cx))],
-                        )
-                    });
-                    project.update(cx, |project, cx| {
-                        project.chats.push(chat);
-                        cx.notify();
-                    });
-                }
             }
+        }
+        self.set_bridge_status("thread loaded", cx);
+    }
+
+    fn apply_bridge_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.ui_state.update(cx, |state, cx| {
+            state.active_turn = None;
+            cx.notify();
+        });
+        self.set_bridge_status("codex app-server error", cx);
+        if let Some(chat) = self.active_chat_entity(cx) {
+            let thread_id = chat.read(cx).id.clone();
+            self.append_message(&thread_id, Message::Commentary(message), cx);
+        } else if let Some(project) = self.active_project_entity(cx) {
+            let chat = cx.new(|cx| {
+                ChatState::new(
+                    "bridge-error".into(),
+                    "Bridge error".into(),
+                    message.clone().into(),
+                    vec![cx.new(|cx| MessageState::new(Message::Commentary(message), cx))],
+                )
+            });
+            project.update(cx, |project, cx| {
+                project.chats.push(chat);
+                cx.notify();
+            });
         }
     }
 
