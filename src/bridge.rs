@@ -10,7 +10,8 @@ use codex_app_server_protocol::{
     PermissionProfileListResponse, RequestId, ServerNotification, Thread, ThreadForkParams,
     ThreadForkResponse, ThreadItem, ThreadListCwdFilter, ThreadListParams, ThreadListResponse,
     ThreadResumeParams, ThreadResumeResponse, ThreadSource, ThreadStartParams, ThreadStartResponse,
-    ThreadStatus, TurnStartParams, TurnStartResponse, UserInput,
+    ThreadStatus, TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnSteerParams,
+    TurnSteerResponse, UserInput,
 };
 use codex_protocol::openai_models::ReasoningEffort;
 use serde::Serialize;
@@ -40,6 +41,15 @@ pub enum BridgeCommand {
         text: String,
         settings: ChatSettings,
     },
+    SteerTurn {
+        thread_id: String,
+        turn_id: String,
+        text: String,
+    },
+    InterruptTurn {
+        thread_id: String,
+        turn_id: String,
+    },
     ForkThread {
         thread_id: String,
     },
@@ -60,8 +70,13 @@ pub enum BridgeEvent {
     ThreadStarted(Thread),
     ThreadResumed(Thread),
     ThreadForked(Thread),
+    ThreadNameUpdated {
+        thread_id: String,
+        thread_name: Option<String>,
+    },
     TurnStarted {
         thread_id: String,
+        turn_id: String,
     },
     ItemStarted {
         thread_id: String,
@@ -80,6 +95,10 @@ pub enum BridgeEvent {
     ItemCompleted {
         thread_id: String,
         item: ThreadItem,
+    },
+    TurnCompleted {
+        thread_id: String,
+        turn_id: String,
     },
     Error(String),
 }
@@ -269,6 +288,34 @@ fn run_app_server_bridge(command_rx: Receiver<BridgeCommand>, event_tx: Sender<B
                         output_schema: None,
                         collaboration_mode: None,
                     },
+                    &mut requests,
+                    &mut next_id,
+                    &mut stdin,
+                ),
+                BridgeCommand::SteerTurn {
+                    thread_id,
+                    turn_id,
+                    text,
+                } => send_request(
+                    "turn/steer",
+                    TurnSteerParams {
+                        thread_id,
+                        client_user_message_id: None,
+                        input: vec![UserInput::Text {
+                            text,
+                            text_elements: Vec::new(),
+                        }],
+                        responsesapi_client_metadata: None,
+                        additional_context: None,
+                        expected_turn_id: turn_id,
+                    },
+                    &mut requests,
+                    &mut next_id,
+                    &mut stdin,
+                ),
+                BridgeCommand::InterruptTurn { thread_id, turn_id } => send_request(
+                    "turn/interrupt",
+                    TurnInterruptParams { thread_id, turn_id },
                     &mut requests,
                     &mut next_id,
                     &mut stdin,
@@ -495,6 +542,10 @@ fn handle_response(method: &str, response: JSONRPCResponse, event_tx: &Sender<Br
         "turn/start" => {
             let _ = decode_result::<TurnStartResponse>(response.result, event_tx);
         }
+        "turn/steer" => {
+            let _ = decode_result::<TurnSteerResponse>(response.result, event_tx);
+        }
+        "turn/interrupt" => {}
         "thread/settings/update" => {}
         _ => {}
     }
@@ -548,9 +599,16 @@ fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<Brid
         ServerNotification::ThreadStarted(params) => {
             let _ = event_tx.send(BridgeEvent::ThreadStarted(params.thread));
         }
+        ServerNotification::ThreadNameUpdated(params) => {
+            let _ = event_tx.send(BridgeEvent::ThreadNameUpdated {
+                thread_id: params.thread_id,
+                thread_name: params.thread_name,
+            });
+        }
         ServerNotification::TurnStarted(params) => {
             let _ = event_tx.send(BridgeEvent::TurnStarted {
                 thread_id: params.thread_id,
+                turn_id: params.turn.id,
             });
         }
         ServerNotification::ItemStarted(params) => {
@@ -585,8 +643,12 @@ fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<Brid
                 thread_status_label(&params.status)
             )));
         }
-        ServerNotification::TurnCompleted(_) => {
+        ServerNotification::TurnCompleted(params) => {
             let _ = event_tx.send(BridgeEvent::Status("turn complete".into()));
+            let _ = event_tx.send(BridgeEvent::TurnCompleted {
+                thread_id: params.thread_id,
+                turn_id: params.turn.id,
+            });
         }
         ServerNotification::Error(params) => {
             let _ = event_tx.send(BridgeEvent::Error(params.error.message));

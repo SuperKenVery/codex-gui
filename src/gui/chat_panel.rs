@@ -53,7 +53,11 @@ impl ChatPanel {
             cx.observe(&bridge_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&composer_input, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    view.send_composer_turn(window, cx);
+                    if view.active_chat_turn_running(cx) {
+                        view.steer_composer_turn(window, cx);
+                    } else {
+                        view.send_composer_turn(window, cx);
+                    }
                 }
             }),
             cx.subscribe_in(&project_path_input, window, |view, _, event, window, cx| {
@@ -91,6 +95,52 @@ impl ChatPanel {
         cx.defer(move |cx| {
             let _ = parent.update(cx, |parent, cx| parent.send_turn_text(text, cx));
         });
+    }
+
+    fn steer_composer_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer_input.update(cx, |input, cx| {
+            let text = input.value().trim().to_string();
+            if !text.is_empty() {
+                input.set_value("", window, cx);
+            }
+            text
+        });
+        if text.is_empty() {
+            return;
+        }
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.steer_turn_text(text, cx));
+        });
+    }
+
+    fn stop_active_turn(&mut self, cx: &mut Context<Self>) {
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.stop_active_turn(cx));
+        });
+    }
+
+    fn active_chat_turn_running(&self, cx: &mut Context<Self>) -> bool {
+        let (project, active_chat) = {
+            let state = self.state.read(cx);
+            (state.active_project(), state.active_chat)
+        };
+        let active_thread_id = project.and_then(|project| {
+            project
+                .read(cx)
+                .chats
+                .get(active_chat)
+                .map(|chat| chat.read(cx).id.clone())
+        });
+        let Some(active_thread_id) = active_thread_id else {
+            return false;
+        };
+        self.ui_state
+            .read(cx)
+            .active_turn
+            .as_ref()
+            .is_some_and(|active_turn| active_turn.thread_id == active_thread_id)
     }
 
     fn fork_chat(&mut self, cx: &mut Context<Self>) {
@@ -161,6 +211,7 @@ impl ChatPanel {
                     "xhigh".into(),
                 ]
             });
+        let turn_running = self.active_chat_turn_running(cx);
 
         div()
             .w_full()
@@ -331,15 +382,43 @@ impl ChatPanel {
                             ),
                     )
                     .child(
-                        Button::new("send-composer-turn")
-                            .small()
-                            .primary()
-                            .rounded(px(999.))
-                            .icon(IconName::ArrowUp)
-                            .tooltip("Send")
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.send_composer_turn(window, cx)
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(turn_running, |actions| {
+                                actions.child(
+                                    Button::new("steer-composer-turn")
+                                        .small()
+                                        .primary()
+                                        .rounded(px(999.))
+                                        .icon(IconName::ArrowUp)
+                                        .tooltip("Steer")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.steer_composer_turn(window, cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("send-or-stop-composer-turn")
+                                    .small()
+                                    .when(!turn_running, |button| button.primary())
+                                    .when(turn_running, |button| button.danger())
+                                    .rounded(px(999.))
+                                    .icon(if turn_running {
+                                        IconName::Close
+                                    } else {
+                                        IconName::ArrowUp
+                                    })
+                                    .tooltip(if turn_running { "Stop" } else { "Send" })
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        if view.active_chat_turn_running(cx) {
+                                            view.stop_active_turn(cx);
+                                        } else {
+                                            view.send_composer_turn(window, cx);
+                                        }
+                                    })),
+                            ),
                     ),
             )
     }

@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use crate::gui::{Message, MessageState, StreamState, ToolCall, ToolStatus};
+use crate::gui::{AssistantPhase, Message, MessageState, StreamState, ToolCall, ToolStatus};
 use gpui::{
     App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
     prelude::*, px, rems,
 };
 use gpui_component::{
-    Selectable as _, Sizable as _,
+    Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     clipboard::Clipboard,
     h_flex,
@@ -93,14 +93,25 @@ pub(super) fn render_message_state(
     )
 }
 
-pub(super) fn render_worked_summary(duration: Duration, theme: &Theme) -> gpui::Div {
+pub(super) fn render_worked_summary(
+    duration: Duration,
+    theme: &Theme,
+    expanded: bool,
+) -> gpui::Div {
     div()
         .w_full()
         .min_w_0()
         .py_1()
+        .cursor_pointer()
         .text_sm()
         .text_color(theme.muted_foreground)
-        .child(format!("Worked for {}", format_duration(duration)))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(disclosure_icon(expanded, theme))
+                .child(format!("Worked for {}", format_duration(duration))),
+        )
 }
 
 fn render_message_view(
@@ -118,16 +129,19 @@ fn render_message_view(
 ) -> gpui::Div {
     match message {
         Message::User(body) => user_message_block(body, theme),
-        Message::Commentary(body) => {
-            message_block("Commentary", body, body_view, theme, zed_markdown)
-        }
+        Message::Commentary(body) => message_block("", body, body_view, theme, zed_markdown),
         Message::Assistant {
-            body, state, tools, ..
+            body,
+            state,
+            phase,
+            tools,
+            ..
         } => {
             let mut block = message_block(
-                match state {
-                    StreamState::Complete => "Codex",
-                    StreamState::Streaming => "Codex is working",
+                match (*phase, state) {
+                    (AssistantPhase::Commentary, _) => "",
+                    (AssistantPhase::FinalAnswer, StreamState::Complete) => "Codex",
+                    (AssistantPhase::FinalAnswer, StreamState::Streaming) => "Codex is working",
                 },
                 body,
                 body_view,
@@ -199,23 +213,28 @@ fn message_block(
     zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
     let is_large_body = body.len() >= LARGE_MARKDOWN_BODY_BYTES;
-    let body = if let Some((Some(markdown), window)) = zed_markdown {
+    let body = if body.is_empty() {
+        None
+    } else if let Some((Some(markdown), window)) = zed_markdown {
         ZedMarkdownElement::new(markdown.clone(), zed_markdown_style(window, theme))
             .into_any_element()
+            .into()
     } else {
-        body_view
-            .map(TextView::new)
-            .unwrap_or_else(|| markdown(body.to_string()))
-            .selectable(true)
-            .code_block_actions(|code_block, _, _| {
-                h_flex()
-                    .gap_1()
-                    .child(Clipboard::new("copy-code").value(code_block.code().clone()))
-            })
-            .when(is_large_body, |view| {
-                view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
-            })
-            .into_any_element()
+        Some(
+            body_view
+                .map(TextView::new)
+                .unwrap_or_else(|| markdown(body.to_string()))
+                .selectable(true)
+                .code_block_actions(|code_block, _, _| {
+                    h_flex()
+                        .gap_1()
+                        .child(Clipboard::new("copy-code").value(code_block.code().clone()))
+                })
+                .when(is_large_body, |view| {
+                    view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
+                })
+                .into_any_element(),
+        )
     };
 
     div()
@@ -226,14 +245,18 @@ fn message_block(
         .flex()
         .flex_col()
         .gap_2()
-        .child(
-            div()
-                .min_w_0()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(author),
-        )
-        .child(div().w_full().min_w_0().overflow_x_hidden().child(body))
+        .when(!author.is_empty(), |block| {
+            block.child(
+                div()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(author),
+            )
+        })
+        .when_some(body, |block, body| {
+            block.child(div().w_full().min_w_0().overflow_x_hidden().child(body))
+        })
 }
 
 fn zed_markdown_style(window: &Window, theme: &Theme) -> ZedMarkdownStyle {
@@ -269,15 +292,29 @@ fn render_tool_summary(tools: &[ToolCall], theme: &Theme, expanded: bool) -> gpu
         )
     };
 
-    let indicator = if expanded { "^" } else { "v" };
-
     div()
         .w_full()
         .min_w_0()
         .cursor_pointer()
         .text_sm()
         .text_color(theme.muted_foreground)
-        .child(format!("{label}  {indicator}"))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(disclosure_icon(expanded, theme))
+                .child(label),
+        )
+}
+
+fn disclosure_icon(expanded: bool, theme: &Theme) -> impl IntoElement {
+    Icon::new(if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    })
+    .xsmall()
+    .text_color(theme.muted_foreground)
 }
 
 fn render_tool_list(tools: &[ToolCall], theme: &Theme) -> gpui::Div {

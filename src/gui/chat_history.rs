@@ -1,12 +1,12 @@
 use std::{collections::HashSet, time::Duration};
 
 use crate::gui::{
-    ChatState, GuiState, Message, MessageState,
+    AssistantPhase, ChatState, GuiState, Message, MessageState,
     widgets::{render_message, render_message_state, render_worked_summary},
 };
 use gpui::{
-    AnyElement, Context, Entity, EntityId, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, Styled, Subscription, Window, div, list, prelude::*, px,
+    AnyElement, Context, Entity, EntityId, FollowMode, IntoElement, ListAlignment, ListState,
+    ParentElement, Render, Styled, Subscription, Window, div, list, prelude::*, px,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -42,6 +42,9 @@ impl ChatHistory {
             })
             .unwrap_or_default();
 
+        let list_state = ListState::new(0, ListAlignment::Top, px(1000.));
+        list_state.set_follow_mode(FollowMode::Tail);
+
         Self {
             state,
             active_chat,
@@ -49,7 +52,7 @@ impl ChatHistory {
             chat_subscription,
             message_subscriptions,
             expanded_turns: HashSet::new(),
-            list_state: ListState::new(0, ListAlignment::Top, px(1000.)),
+            list_state,
             row_keys: Vec::new(),
         }
     }
@@ -73,6 +76,7 @@ impl ChatHistory {
             })
             .unwrap_or_default();
         self.list_state.reset(0);
+        self.list_state.set_follow_mode(FollowMode::Tail);
         self.row_keys.clear();
         self.active_chat = active_chat;
     }
@@ -139,9 +143,13 @@ impl ChatHistory {
             self.list_state.clone(),
             move |index, _window, cx| match rows_for_render.get(index).cloned() {
                 Some(HistoryRow::Message(message)) => message.into_any_element(),
-                Some(HistoryRow::Summary { turn_id, duration }) => {
+                Some(HistoryRow::Summary {
+                    turn_id,
+                    duration,
+                    expanded,
+                }) => {
                     let history = history.clone();
-                    render_worked_summary(duration, cx.theme())
+                    render_worked_summary(duration, cx.theme(), expanded)
                         .id(format!("worked-summary-{turn_id}"))
                         .on_click(move |_, _, cx| {
                             let _ = history.update(cx, |history, cx| {
@@ -179,6 +187,7 @@ impl ChatHistory {
                     rows.push(HistoryRow::Summary {
                         turn_id,
                         duration: fold.duration,
+                        expanded: self.expanded_turns.contains(&turn_id),
                     });
 
                     if self.expanded_turns.contains(&turn_id) {
@@ -258,6 +267,7 @@ enum HistoryRow {
     Summary {
         turn_id: EntityId,
         duration: Duration,
+        expanded: bool,
     },
 }
 
@@ -321,6 +331,7 @@ fn completed_turn_fold(
             Message::Assistant {
                 body,
                 state: crate::gui::StreamState::Complete,
+                phase: AssistantPhase::FinalAnswer,
                 tools,
                 ..
             } if !body.trim().is_empty()

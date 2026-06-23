@@ -285,9 +285,16 @@ pub enum Message {
         id: String,
         body: String,
         state: StreamState,
+        phase: AssistantPhase,
         tools: Vec<ToolCall>,
     },
     Commentary(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AssistantPhase {
+    Commentary,
+    FinalAnswer,
 }
 
 #[derive(Clone, Copy)]
@@ -325,6 +332,7 @@ impl BridgeState {
 pub struct UiState {
     pub side_chat_open: bool,
     pub new_chat_open: bool,
+    pub active_turn: Option<ActiveTurn>,
 }
 
 impl UiState {
@@ -332,6 +340,13 @@ impl UiState {
         Self {
             side_chat_open: false,
             new_chat_open: true,
+            active_turn: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveTurn {
+    pub thread_id: String,
+    pub turn_id: String,
 }

@@ -1,13 +1,15 @@
 use crate::bridge::{BridgeCommand, BridgeEvent, start_app_server_bridge};
 use crate::gui::{
-    ApprovalReviewerMode, BridgeState, ChatPanel, ChatState, GuiState, Message, MessageState,
-    ProjectState, SideChat, Sidebar, StreamState, ToolCall, ToolStatus, UiState,
+    ActiveTurn, ApprovalReviewerMode, AssistantPhase, BridgeState, ChatPanel, ChatState, GuiState,
+    Message, MessageState, ProjectState, SideChat, Sidebar, StreamState, ToolCall, ToolStatus,
+    UiState,
 };
 use crate::workspace::workspace_path;
 use codex_app_server_protocol::{
     CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, Thread, ThreadItem,
     ThreadStatus, UserInput,
 };
+use codex_protocol::models::MessagePhase;
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task, Window, div,
     prelude::*, transparent_black,
@@ -197,6 +199,9 @@ impl CodexGui {
     }
 
     pub(crate) fn send_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.ui_state.read(cx).active_turn.is_some() {
+            return;
+        }
         let active_thread_id = self
             .active_chat_entity(cx)
             .map(|chat| chat.read(cx).id.clone())
@@ -220,6 +225,42 @@ impl CodexGui {
             cx,
         );
         self.set_bridge_status("turn running", cx);
+    }
+
+    pub(crate) fn steer_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(active_turn) = self.ui_state.read(cx).active_turn.clone() else {
+            return;
+        };
+        let Some(active_thread_id) = self
+            .active_chat_entity(cx)
+            .map(|chat| chat.read(cx).id.clone())
+            .filter(|thread_id| thread_id == &active_turn.thread_id)
+        else {
+            return;
+        };
+        self.send_bridge(
+            BridgeCommand::SteerTurn {
+                thread_id: active_thread_id,
+                turn_id: active_turn.turn_id,
+                text,
+            },
+            cx,
+        );
+        self.set_bridge_status("steer sent", cx);
+    }
+
+    pub(crate) fn stop_active_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(active_turn) = self.ui_state.read(cx).active_turn.clone() else {
+            return;
+        };
+        self.send_bridge(
+            BridgeCommand::InterruptTurn {
+                thread_id: active_turn.thread_id,
+                turn_id: active_turn.turn_id,
+            },
+            cx,
+        );
+        self.set_bridge_status("stopping turn", cx);
     }
 
     pub(crate) fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
@@ -416,6 +457,14 @@ impl CodexGui {
                     self.set_bridge_status("turn running", cx);
                 }
             }
+            BridgeEvent::ThreadNameUpdated {
+                thread_id,
+                thread_name,
+            } => {
+                if let Some(thread_name) = thread_name.filter(|name| !name.is_empty()) {
+                    self.update_chat_title(&thread_id, thread_name, cx);
+                }
+            }
             BridgeEvent::ThreadResumed(thread) => {
                 let thread_id = thread.id.clone();
                 let chat = chat_entity_from_thread(thread, cx);
@@ -443,8 +492,11 @@ impl CodexGui {
                 }
                 self.set_bridge_status("thread loaded", cx);
             }
-            BridgeEvent::TurnStarted { thread_id } => {
-                let _ = thread_id;
+            BridgeEvent::TurnStarted { thread_id, turn_id } => {
+                self.ui_state.update(cx, |state, cx| {
+                    state.active_turn = Some(ActiveTurn { thread_id, turn_id });
+                    cx.notify();
+                });
                 self.set_bridge_status("turn running", cx);
                 // self.append_message(
                 //     &thread_id,
@@ -468,7 +520,22 @@ impl CodexGui {
             BridgeEvent::ItemCompleted { thread_id, item } => {
                 self.apply_item_completed(&thread_id, item, cx);
             }
+            BridgeEvent::TurnCompleted { thread_id, turn_id } => {
+                self.ui_state.update(cx, |state, cx| {
+                    if state.active_turn.as_ref().is_some_and(|active_turn| {
+                        active_turn.thread_id == thread_id && active_turn.turn_id == turn_id
+                    }) {
+                        state.active_turn = None;
+                        cx.notify();
+                    }
+                });
+                self.finish_completed_tool_messages(&thread_id, cx);
+            }
             BridgeEvent::Error(message) => {
+                self.ui_state.update(cx, |state, cx| {
+                    state.active_turn = None;
+                    cx.notify();
+                });
                 self.set_bridge_status("codex app-server error", cx);
                 if let Some(chat) = self.active_chat_entity(cx) {
                     let thread_id = chat.read(cx).id.clone();
@@ -499,13 +566,17 @@ impl CodexGui {
                     self.append_message(thread_id, Message::User(text), cx);
                 }
             }
-            ThreadItem::AgentMessage { id, text, .. } => {
+            ThreadItem::AgentMessage {
+                id, text, phase, ..
+            } => {
+                self.finish_completed_tool_messages(thread_id, cx);
                 self.append_message(
                     thread_id,
                     Message::Assistant {
                         id,
                         body: text,
                         state: StreamState::Streaming,
+                        phase: assistant_phase(phase.as_ref()),
                         tools: Vec::new(),
                     },
                     cx,
@@ -640,6 +711,16 @@ impl CodexGui {
         });
     }
 
+    fn update_chat_title(&self, thread_id: &str, title: String, cx: &mut Context<Self>) {
+        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
+            return;
+        };
+        chat.update(cx, |chat, cx| {
+            chat.title = title.into();
+            cx.notify();
+        });
+    }
+
     fn append_agent_delta(
         &self,
         thread_id: &str,
@@ -654,6 +735,7 @@ impl CodexGui {
                     id: item_id.to_string(),
                     body: delta.to_string(),
                     state: StreamState::Streaming,
+                    phase: AssistantPhase::FinalAnswer,
                     tools: Vec::new(),
                 },
                 cx,
@@ -672,7 +754,7 @@ impl CodexGui {
     }
 
     fn append_or_update_tool(&self, thread_id: &str, tool: ToolCall, cx: &mut Context<Self>) {
-        if let Some(message) = self.find_latest_assistant_message(thread_id, cx) {
+        if let Some(message) = self.find_latest_streaming_assistant_message(thread_id, cx) {
             message.update(cx, |message, cx| {
                 if let Message::Assistant { tools, .. } = &mut message.message {
                     if let Some(existing) = tools.iter_mut().find(|existing| existing.id == tool.id)
@@ -690,12 +772,43 @@ impl CodexGui {
                 thread_id,
                 Message::Assistant {
                     id: format!("tool-group-{}", tool.id),
-                    body: "Codex is using tools.".into(),
+                    body: String::new(),
                     state: StreamState::Streaming,
+                    phase: AssistantPhase::Commentary,
                     tools: vec![tool],
                 },
                 cx,
             );
+        }
+    }
+
+    fn finish_completed_tool_messages(&self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
+            return;
+        };
+        let messages = chat.read(cx).messages.clone();
+        for message in messages {
+            message.update(cx, |message, cx| {
+                let Message::Assistant {
+                    state, tools, body, ..
+                } = &mut message.message
+                else {
+                    return;
+                };
+                if !matches!(*state, StreamState::Streaming) || tools.is_empty() {
+                    return;
+                }
+                if tools
+                    .iter()
+                    .all(|tool| matches!(tool.status, ToolStatus::Done))
+                    && body.is_empty()
+                {
+                    *state = StreamState::Complete;
+                    message.touch();
+                    message.sync_body_view(cx);
+                    cx.notify();
+                }
+            });
         }
     }
 
@@ -766,7 +879,7 @@ impl CodexGui {
         None
     }
 
-    fn find_latest_assistant_message(
+    fn find_latest_streaming_assistant_message(
         &self,
         thread_id: &str,
         cx: &mut Context<Self>,
@@ -774,7 +887,13 @@ impl CodexGui {
         let chat = self.find_chat_entity(thread_id, cx)?;
         let messages = chat.read(cx).messages.clone();
         for message in messages.into_iter().rev() {
-            let is_match = matches!(&message.read(cx).message, Message::Assistant { .. });
+            let is_match = matches!(
+                &message.read(cx).message,
+                Message::Assistant {
+                    state: StreamState::Streaming,
+                    ..
+                }
+            );
             if is_match {
                 return Some(message);
             }
@@ -831,8 +950,6 @@ fn chat_entity_from_thread(thread: Thread, cx: &mut Context<CodexGui>) -> Entity
         .name
         .as_deref()
         .filter(|name| !name.is_empty())
-        .or_else(|| Some(thread.preview.as_str()))
-        .filter(|preview| !preview.is_empty())
         .unwrap_or("Untitled Codex thread")
         .to_string();
     let subtitle = format!(
@@ -889,13 +1006,16 @@ fn append_thread_item(
                 messages.push(cx.new(|cx| MessageState::new(Message::User(text), cx)));
             }
         }
-        ThreadItem::AgentMessage { id, text, .. } => {
+        ThreadItem::AgentMessage {
+            id, text, phase, ..
+        } => {
             messages.push(cx.new(|cx| {
                 MessageState::new(
                     Message::Assistant {
                         id,
                         body: text,
                         state: StreamState::Complete,
+                        phase: assistant_phase(phase.as_ref()),
                         tools: Vec::new(),
                     },
                     cx,
@@ -975,13 +1095,21 @@ fn push_tool_to_messages(
         MessageState::new(
             Message::Assistant {
                 id: format!("tool-group-{}", tool.id),
-                body: "Codex used a tool.".into(),
+                body: String::new(),
                 state: StreamState::Complete,
+                phase: AssistantPhase::Commentary,
                 tools: vec![tool],
             },
             cx,
         )
     }));
+}
+
+fn assistant_phase(phase: Option<&MessagePhase>) -> AssistantPhase {
+    match phase {
+        Some(MessagePhase::Commentary) => AssistantPhase::Commentary,
+        Some(MessagePhase::FinalAnswer) | None => AssistantPhase::FinalAnswer,
+    }
 }
 
 fn upsert_chat(
