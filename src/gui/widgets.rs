@@ -25,9 +25,9 @@ const LARGE_MARKDOWN_VIEW_HEIGHT: f32 = 520.;
 pub(super) fn chat_tree_item(
     id: impl Into<gpui::ElementId>,
     title: SharedString,
-    subtitle: SharedString,
+    _subtitle: SharedString,
     selected: bool,
-    theme: &Theme,
+    _theme: &Theme,
 ) -> Button {
     Button::new(id)
         .ghost()
@@ -117,17 +117,10 @@ fn render_message_view(
     zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
     match message {
-        Message::User(body) => {
-            message_block("You", body, None, theme, MessageBodyFormat::Plain, None)
+        Message::User(body) => user_message_block(body, theme),
+        Message::Commentary(body) => {
+            message_block("Commentary", body, body_view, theme, zed_markdown)
         }
-        Message::Commentary(body) => message_block(
-            "Commentary",
-            body,
-            body_view,
-            theme,
-            MessageBodyFormat::Markdown,
-            zed_markdown,
-        ),
         Message::Assistant {
             body, state, tools, ..
         } => {
@@ -139,7 +132,6 @@ fn render_message_view(
                 body,
                 body_view,
                 theme,
-                MessageBodyFormat::Markdown,
                 zed_markdown,
             );
 
@@ -174,9 +166,29 @@ fn render_message_view(
     }
 }
 
-enum MessageBodyFormat {
-    Plain,
-    Markdown,
+fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_x_hidden()
+        .py_2()
+        .flex()
+        .justify_end()
+        .child(
+            div()
+                .max_w(px(620.))
+                .min_w_0()
+                .overflow_x_hidden()
+                .rounded_lg()
+                .bg(theme.secondary)
+                .px_3()
+                .py_2()
+                .text_sm()
+                .line_height(px(22.))
+                .text_color(theme.secondary_foreground)
+                .whitespace_normal()
+                .child(body.to_string()),
+        )
 }
 
 fn message_block(
@@ -184,38 +196,26 @@ fn message_block(
     body: &str,
     body_view: Option<&Entity<TextViewState>>,
     theme: &Theme,
-    body_format: MessageBodyFormat,
     zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
-    let body = match body_format {
-        MessageBodyFormat::Plain => div()
-            .text_sm()
-            .line_height(px(22.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .whitespace_normal()
-            .child(body.to_string())
-            .into_any_element(),
-        MessageBodyFormat::Markdown => {
-            let is_large_body = body.len() >= LARGE_MARKDOWN_BODY_BYTES;
-            if let Some((Some(markdown), window)) = zed_markdown {
-                ZedMarkdownElement::new(markdown.clone(), zed_markdown_style(window, theme))
-                    .into_any_element()
-            } else {
-                body_view
-                    .map(TextView::new)
-                    .unwrap_or_else(|| markdown(body.to_string()))
-                    .selectable(true)
-                    .code_block_actions(|code_block, _, _| {
-                        h_flex()
-                            .gap_1()
-                            .child(Clipboard::new("copy-code").value(code_block.code().clone()))
-                    })
-                    .when(is_large_body, |view| {
-                        view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
-                    })
-                    .into_any_element()
-            }
-        }
+    let is_large_body = body.len() >= LARGE_MARKDOWN_BODY_BYTES;
+    let body = if let Some((Some(markdown), window)) = zed_markdown {
+        ZedMarkdownElement::new(markdown.clone(), zed_markdown_style(window, theme))
+            .into_any_element()
+    } else {
+        body_view
+            .map(TextView::new)
+            .unwrap_or_else(|| markdown(body.to_string()))
+            .selectable(true)
+            .code_block_actions(|code_block, _, _| {
+                h_flex()
+                    .gap_1()
+                    .child(Clipboard::new("copy-code").value(code_block.code().clone()))
+            })
+            .when(is_large_body, |view| {
+                view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
+            })
+            .into_any_element()
     };
 
     div()
