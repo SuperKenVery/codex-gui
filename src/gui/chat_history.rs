@@ -42,7 +42,7 @@ impl ChatHistory {
             })
             .unwrap_or_default();
 
-        let list_state = ListState::new(0, ListAlignment::Top, px(1000.));
+        let list_state = ListState::new(0, ListAlignment::Top, px(120.));
         list_state.set_follow_mode(FollowMode::Tail);
 
         Self {
@@ -102,7 +102,7 @@ impl Render for ChatHistory {
                     .overflow_x_hidden()
                     .overflow_y_scroll()
                     .child(render_message(
-                        &Message::Commentary("Loading Codex threads from the app server.".into()),
+                        &Message::Notice("Loading Codex threads from the app server.".into()),
                         cx.theme(),
                     ))
                     .into_any_element()
@@ -157,6 +157,7 @@ impl ChatHistory {
                                     history.expanded_turns.insert(turn_id);
                                 }
                                 history.rebuild_rows(cx);
+                                history.list_state.remeasure();
                                 cx.notify();
                             });
                         })
@@ -293,8 +294,11 @@ fn configure_message(
     active_tool_tail: bool,
     cx: &mut Context<ChatHistory>,
 ) {
-    message.update(cx, |message, _| {
-        message.set_render_options(collapse_tools, hide_tools, active_tool_tail);
+    message.update(cx, |message, cx| {
+        let changed = message.set_render_options(collapse_tools, hide_tools, active_tool_tail);
+        if changed {
+            cx.notify();
+        }
     });
 }
 
@@ -335,7 +339,9 @@ fn completed_turn_fold(
                 tools,
                 ..
             } if !body.trim().is_empty()
-                && tools.iter().all(|tool| matches!(tool.status, crate::gui::ToolStatus::Done))
+                && tools
+                    .iter()
+                    .all(|tool| matches!(tool.status(), crate::gui::ToolStatus::Done))
         )
     })?;
 

@@ -11,6 +11,7 @@ pub use side_chat::SideChat;
 pub use sidebar::Sidebar;
 pub use state::{
     ActiveTurn, ApprovalReviewerMode, AssistantPhase, BridgeState, ChatSettings, ChatState,
-    GuiState, Message, MessageState, ModelOption, PermissionMode, PermissionProfileOption,
-    ProjectState, StreamState, ToolCall, ToolStatus, UiState, permission_profile_label,
+    FileChangeKind, FileChangeSummary, GuiState, Message, MessageState, ModelOption,
+    PermissionMode, PermissionProfileOption, ProjectState, StreamState, ToolCall, ToolStatus,
+    UiState, permission_profile_label,
 };

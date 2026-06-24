@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::gui::{AssistantPhase, Message, MessageState, StreamState, ToolCall, ToolStatus};
+use crate::gui::{
+    AssistantPhase, FileChangeKind, Message, MessageState, StreamState, ToolCall, ToolStatus,
+};
 use gpui::{
     App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
     prelude::*, px, rems,
@@ -129,7 +131,7 @@ fn render_message_view(
 ) -> gpui::Div {
     match message {
         Message::User(body) => user_message_block(body, theme),
-        Message::Commentary(body) => message_block("", body, body_view, theme, zed_markdown),
+        Message::Notice(body) => notice_message_block(body, body_view, theme, zed_markdown),
         Message::Assistant {
             body,
             state,
@@ -159,7 +161,7 @@ fn render_message_view(
                     let mut tool_group = div().flex().flex_col().gap_2();
                     let summary = match tool_toggle {
                         Some((_, on_toggle)) => render_tool_summary(tools, theme, expanded)
-                            .id(format!("tool-summary-{}", tools[0].id))
+                            .id(format!("tool-summary-{}", tools[0].id()))
                             .on_click(on_toggle)
                             .into_any_element(),
                         None => render_tool_summary(tools, theme, expanded).into_any_element(),
@@ -178,6 +180,15 @@ fn render_message_view(
             block
         }
     }
+}
+
+fn notice_message_block(
+    body: &str,
+    body_view: Option<&Entity<TextViewState>>,
+    theme: &Theme,
+    zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
+) -> gpui::Div {
+    message_block("", body, body_view, theme, zed_markdown)
 }
 
 fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
@@ -276,7 +287,7 @@ fn zed_markdown_style(window: &Window, theme: &Theme) -> ZedMarkdownStyle {
 fn render_tool_summary(tools: &[ToolCall], theme: &Theme, expanded: bool) -> gpui::Div {
     let running = tools
         .iter()
-        .filter(|tool| matches!(tool.status, ToolStatus::Running))
+        .filter(|tool| matches!(tool.status(), ToolStatus::Running))
         .count();
     let label = if running > 0 {
         format!(
@@ -320,16 +331,17 @@ fn disclosure_icon(expanded: bool, theme: &Theme) -> impl IntoElement {
 fn render_tool_list(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
     tools
         .iter()
-        .fold(div().flex().flex_col().gap_2(), |list, tool| {
+        .fold(div().w_full().min_w_0().flex().flex_col().gap_2(), |list, tool| {
             list.child(render_tool_call(tool, theme))
         })
 }
 
 fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
-    let (label, color) = match tool.status {
+    let (label, color) = match tool.status() {
         ToolStatus::Running => ("running", theme.warning_foreground),
         ToolStatus::Done => ("done", theme.success_foreground),
     };
+    let (title, detail) = tool_call_text(tool);
 
     div()
         .w_full()
@@ -337,11 +349,11 @@ fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
         .overflow_x_hidden()
         .py_1()
         .flex()
-        .items_center()
-        .justify_between()
+        .items_start()
         .gap_3()
         .child(
             div()
+                .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
@@ -351,8 +363,9 @@ fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
                         .min_w_0()
                         .overflow_x_hidden()
                         .text_sm()
+                        .text_color(theme.foreground)
                         .whitespace_normal()
-                        .child(tool.name.clone()),
+                        .child(title),
                 )
                 .child(
                     div()
@@ -361,10 +374,61 @@ fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .whitespace_normal()
-                        .child(tool.detail.clone()),
+                        .child(detail),
                 ),
         )
-        .child(div().text_color(color).text_xs().child(label))
+        .child(
+            div()
+                .flex_none()
+                .text_color(color)
+                .text_xs()
+                .child(label),
+        )
+}
+
+fn tool_call_text(tool: &ToolCall) -> (String, String) {
+    match tool {
+        ToolCall::Command { command, cwd, .. } => ("Terminal".into(), format!("{command} ({cwd})")),
+        ToolCall::FileChange { changes, .. } => {
+            let detail = if changes.is_empty() {
+                "Preparing file edits".into()
+            } else {
+                changes
+                    .iter()
+                    .map(|change| {
+                        let action = match &change.kind {
+                            FileChangeKind::Add => "added",
+                            FileChangeKind::Delete => "deleted",
+                            FileChangeKind::Update { move_path: None } => "edited",
+                            FileChangeKind::Update { move_path: Some(_) } => "moved",
+                        };
+                        let path = match &change.kind {
+                            FileChangeKind::Update {
+                                move_path: Some(move_path),
+                            } => format!("{} -> {}", change.path, move_path),
+                            _ => change.path.clone(),
+                        };
+                        format!(
+                            "{action} {path} (+{} -{})",
+                            change.additions, change.deletions
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            ("File edit".into(), detail)
+        }
+        ToolCall::Mcp { server, tool, .. } => ("MCP tool".into(), format!("{server}.{tool}")),
+        ToolCall::Dynamic {
+            namespace, tool, ..
+        } => {
+            let detail = namespace
+                .as_ref()
+                .map(|namespace| format!("{namespace}.{tool}"))
+                .unwrap_or_else(|| tool.clone());
+            ("Tool call".into(), detail)
+        }
+    }
 }
 
 fn pluralize(count: usize, singular: &'static str) -> &'static str {

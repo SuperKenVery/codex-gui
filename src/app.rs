@@ -1,13 +1,15 @@
 use crate::bridge::{AppServerBridge, BridgeError, BridgeEvent, start_app_server_bridge};
 use crate::gui::{
     ActiveTurn, ApprovalReviewerMode, AssistantPhase, BridgeState, ChatPanel, ChatSettings,
-    ChatState, GuiState, Message, MessageState, ModelOption, PermissionProfileOption, ProjectState,
-    SideChat, Sidebar, StreamState, ToolCall, ToolStatus, UiState,
+    ChatState, FileChangeKind, FileChangeSummary, GuiState, Message, MessageState, ModelOption,
+    PermissionProfileOption, ProjectState, SideChat, Sidebar, StreamState, ToolCall, ToolStatus,
+    UiState,
 };
 use crate::workspace::workspace_path;
 use codex_app_server_protocol::{
-    CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, ServerNotification, Thread,
-    ThreadItem, ThreadStatus, UserInput,
+    CommandExecutionStatus, DynamicToolCallStatus, FileUpdateChange, McpToolCallStatus,
+    PatchApplyStatus, PatchChangeKind, ServerNotification, Thread, ThreadItem, ThreadStatus,
+    UserInput,
 };
 use codex_protocol::models::MessagePhase;
 use gpui::{
@@ -672,6 +674,22 @@ impl CodexGui {
                     cx,
                 );
             }
+            ServerNotification::FileChangeOutputDelta(params) => {
+                self.append_tool_output_delta(
+                    &params.thread_id,
+                    &params.item_id,
+                    &params.delta,
+                    cx,
+                );
+            }
+            ServerNotification::FileChangePatchUpdated(params) => {
+                self.update_file_change_tool(
+                    &params.thread_id,
+                    &params.item_id,
+                    summarize_file_changes(params.changes),
+                    cx,
+                );
+            }
             ServerNotification::ItemCompleted(params) => {
                 self.apply_item_completed(&params.thread_id, params.item, cx);
             }
@@ -763,14 +781,14 @@ impl CodexGui {
         self.set_bridge_status("codex app-server error", cx);
         if let Some(chat) = self.active_chat_entity(cx) {
             let thread_id = chat.read(cx).id.clone();
-            self.append_message(&thread_id, Message::Commentary(message), cx);
+            self.append_message(&thread_id, Message::Notice(message), cx);
         } else if let Some(project) = self.active_project_entity(cx) {
             let chat = cx.new(|cx| {
                 ChatState::new(
                     "bridge-error".into(),
                     "Bridge error".into(),
                     message.clone().into(),
-                    vec![cx.new(|cx| MessageState::new(Message::Commentary(message), cx))],
+                    vec![cx.new(|cx| MessageState::new(Message::Notice(message), cx))],
                 )
             });
             project.update(cx, |project, cx| {
@@ -809,24 +827,57 @@ impl CodexGui {
             } => {
                 self.append_or_update_tool(
                     thread_id,
-                    ToolCall {
+                    ToolCall::Command {
                         id,
-                        name: tool_name(&command, "command"),
+                        command,
+                        cwd: cwd.display().to_string(),
                         status: ToolStatus::Running,
-                        detail: cwd.display().to_string(),
                     },
                     cx,
                 );
             }
-            ThreadItem::McpToolCall { id, tool, .. }
-            | ThreadItem::DynamicToolCall { id, tool, .. } => {
+            ThreadItem::FileChange {
+                id,
+                changes,
+                status,
+            } => {
                 self.append_or_update_tool(
                     thread_id,
-                    ToolCall {
+                    ToolCall::FileChange {
                         id,
-                        name: tool_name(&tool, "tool call"),
+                        changes: summarize_file_changes(changes),
+                        status: tool_status_from_patch(&status),
+                    },
+                    cx,
+                );
+            }
+            ThreadItem::McpToolCall {
+                id, server, tool, ..
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall::Mcp {
+                        id,
+                        server,
+                        tool,
                         status: ToolStatus::Running,
-                        detail: "tool call started".into(),
+                    },
+                    cx,
+                );
+            }
+            ThreadItem::DynamicToolCall {
+                id,
+                namespace,
+                tool,
+                ..
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall::Dynamic {
+                        id,
+                        namespace,
+                        tool,
+                        status: ToolStatus::Running,
                     },
                     cx,
                 );
@@ -841,47 +892,70 @@ impl CodexGui {
                 id,
                 command,
                 cwd,
-                aggregated_output,
                 status,
                 ..
             } => {
                 self.append_or_update_tool(
                     thread_id,
-                    ToolCall {
+                    ToolCall::Command {
                         id: id.clone(),
-                        name: tool_name(&command, "command"),
+                        command,
+                        cwd: cwd.display().to_string(),
                         status: tool_status_from_command(&status),
-                        detail: aggregated_output.unwrap_or_else(|| cwd.display().to_string()),
+                    },
+                    cx,
+                );
+                self.mark_item_complete(thread_id, &id, cx);
+            }
+            ThreadItem::FileChange {
+                id,
+                changes,
+                status,
+            } => {
+                self.append_or_update_tool(
+                    thread_id,
+                    ToolCall::FileChange {
+                        id: id.clone(),
+                        changes: summarize_file_changes(changes),
+                        status: tool_status_from_patch(&status),
                     },
                     cx,
                 );
                 self.mark_item_complete(thread_id, &id, cx);
             }
             ThreadItem::McpToolCall {
-                id, tool, status, ..
+                id,
+                server,
+                tool,
+                status,
+                ..
             } => {
                 self.append_or_update_tool(
                     thread_id,
-                    ToolCall {
+                    ToolCall::Mcp {
                         id: id.clone(),
-                        name: tool_name(&tool, "tool call"),
+                        server,
+                        tool,
                         status: tool_status_from_mcp(&status),
-                        detail: String::new(),
                     },
                     cx,
                 );
                 self.mark_item_complete(thread_id, &id, cx);
             }
             ThreadItem::DynamicToolCall {
-                id, tool, status, ..
+                id,
+                namespace,
+                tool,
+                status,
+                ..
             } => {
                 self.append_or_update_tool(
                     thread_id,
-                    ToolCall {
+                    ToolCall::Dynamic {
                         id: id.clone(),
-                        name: tool_name(&tool, "tool call"),
+                        namespace,
+                        tool,
                         status: tool_status_from_dynamic(&status),
-                        detail: String::new(),
                     },
                     cx,
                 );
@@ -979,7 +1053,8 @@ impl CodexGui {
         if let Some(message) = self.find_latest_streaming_assistant_message(thread_id, cx) {
             message.update(cx, |message, cx| {
                 if let Message::Assistant { tools, .. } = &mut message.message {
-                    if let Some(existing) = tools.iter_mut().find(|existing| existing.id == tool.id)
+                    if let Some(existing) =
+                        tools.iter_mut().find(|existing| existing.id() == tool.id())
                     {
                         *existing = tool;
                     } else {
@@ -993,7 +1068,7 @@ impl CodexGui {
             self.append_message(
                 thread_id,
                 Message::Assistant {
-                    id: format!("tool-group-{}", tool.id),
+                    id: format!("tool-group-{}", tool.id()),
                     body: String::new(),
                     state: StreamState::Streaming,
                     phase: AssistantPhase::Commentary,
@@ -1022,7 +1097,7 @@ impl CodexGui {
                 }
                 if tools
                     .iter()
-                    .all(|tool| matches!(tool.status, ToolStatus::Done))
+                    .all(|tool| matches!(tool.status(), ToolStatus::Done))
                     && body.is_empty()
                 {
                     *state = StreamState::Complete;
@@ -1046,8 +1121,38 @@ impl CodexGui {
         };
         message.update(cx, |message, cx| {
             if let Message::Assistant { tools, .. } = &mut message.message {
-                if let Some(tool) = tools.iter_mut().find(|tool| tool.id == item_id) {
-                    tool.detail.push_str(delta);
+                if let Some(ToolCall::FileChange { changes, .. }) =
+                    tools.iter_mut().find(|tool| tool.id() == item_id)
+                {
+                    if let Some(last_change) = changes.last_mut() {
+                        let stats = diff_stats(delta);
+                        last_change.additions += stats.additions;
+                        last_change.deletions += stats.deletions;
+                    }
+                    message.touch();
+                    cx.notify();
+                }
+            }
+        });
+    }
+
+    fn update_file_change_tool(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        changes: Vec<FileChangeSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.find_tool_message(thread_id, item_id, cx) else {
+            return;
+        };
+        message.update(cx, |message, cx| {
+            if let Message::Assistant { tools, .. } = &mut message.message {
+                if let Some(ToolCall::FileChange {
+                    changes: existing, ..
+                }) = tools.iter_mut().find(|tool| tool.id() == item_id)
+                {
+                    *existing = changes;
                     message.touch();
                     cx.notify();
                 }
@@ -1071,8 +1176,8 @@ impl CodexGui {
         if let Some(message) = self.find_tool_message(thread_id, item_id, cx) {
             message.update(cx, |message, cx| {
                 if let Message::Assistant { tools, .. } = &mut message.message {
-                    if let Some(tool) = tools.iter_mut().find(|tool| tool.id == item_id) {
-                        tool.status = ToolStatus::Done;
+                    if let Some(tool) = tools.iter_mut().find(|tool| tool.id() == item_id) {
+                        tool.set_status(ToolStatus::Done);
                         message.touch();
                         cx.notify();
                     }
@@ -1134,7 +1239,7 @@ impl CodexGui {
         for message in messages.into_iter().rev() {
             let is_match = matches!(
                 &message.read(cx).message,
-                Message::Assistant { tools, .. } if tools.iter().any(|tool| tool.id == item_id)
+                Message::Assistant { tools, .. } if tools.iter().any(|tool| tool.id() == item_id)
             );
             if is_match {
                 return Some(message);
@@ -1168,12 +1273,7 @@ impl Render for CodexGui {
 }
 
 fn chat_entity_from_thread(thread: Thread, cx: &mut Context<CodexGui>) -> Entity<ChatState> {
-    let title = thread
-        .name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Untitled Codex thread")
-        .to_string();
+    let title = thread_title(thread.name.as_deref(), &thread.preview);
     let subtitle = format!(
         "{} - {}",
         thread_status_label(&thread.status),
@@ -1189,6 +1289,16 @@ fn chat_entity_from_thread(thread: Thread, cx: &mut Context<CodexGui>) -> Entity
     cx.new(|_| ChatState::new(thread_id, title.into(), subtitle.into(), messages))
 }
 
+fn thread_title(name: Option<&str>, preview: &str) -> String {
+    name.filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            let preview = preview.trim();
+            (!preview.is_empty()).then_some(preview)
+        })
+        .unwrap_or("Untitled Codex thread")
+        .to_string()
+}
+
 fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
     cx.new(|cx| {
         ChatState::new(
@@ -1197,7 +1307,7 @@ fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
             "Click New to start one in this workspace".into(),
             vec![cx.new(|cx| {
                 MessageState::new(
-                    Message::Commentary(
+                    Message::Notice(
                         "No persisted Codex threads were returned for this workspace.".into(),
                     ),
                     cx,
@@ -1248,45 +1358,67 @@ fn append_thread_item(
             id,
             command,
             cwd,
-            aggregated_output,
             status,
             ..
         } => {
             push_tool_to_messages(
                 messages,
-                ToolCall {
+                ToolCall::Command {
                     id,
-                    name: tool_name(&command, "command"),
+                    command,
+                    cwd: cwd.display().to_string(),
                     status: tool_status_from_command(&status),
-                    detail: aggregated_output.unwrap_or_else(|| cwd.display().to_string()),
+                },
+                cx,
+            );
+        }
+        ThreadItem::FileChange {
+            id,
+            changes,
+            status,
+        } => {
+            push_tool_to_messages(
+                messages,
+                ToolCall::FileChange {
+                    id,
+                    changes: summarize_file_changes(changes),
+                    status: tool_status_from_patch(&status),
                 },
                 cx,
             );
         }
         ThreadItem::McpToolCall {
-            id, tool, status, ..
+            id,
+            server,
+            tool,
+            status,
+            ..
         } => {
             push_tool_to_messages(
                 messages,
-                ToolCall {
+                ToolCall::Mcp {
                     id,
-                    name: tool_name(&tool, "tool call"),
+                    server,
+                    tool,
                     status: tool_status_from_mcp(&status),
-                    detail: String::new(),
                 },
                 cx,
             );
         }
         ThreadItem::DynamicToolCall {
-            id, tool, status, ..
+            id,
+            namespace,
+            tool,
+            status,
+            ..
         } => {
             push_tool_to_messages(
                 messages,
-                ToolCall {
+                ToolCall::Dynamic {
                     id,
-                    name: tool_name(&tool, "tool call"),
+                    namespace,
+                    tool,
                     status: tool_status_from_dynamic(&status),
-                    detail: String::new(),
                 },
                 cx,
             );
@@ -1316,7 +1448,7 @@ fn push_tool_to_messages(
     messages.push(cx.new(|cx| {
         MessageState::new(
             Message::Assistant {
-                id: format!("tool-group-{}", tool.id),
+                id: format!("tool-group-{}", tool.id()),
                 body: String::new(),
                 state: StreamState::Complete,
                 phase: AssistantPhase::Commentary,
@@ -1382,11 +1514,61 @@ fn tool_status_from_dynamic(status: &DynamicToolCallStatus) -> ToolStatus {
     }
 }
 
-fn tool_name(name: &str, fallback: &str) -> String {
-    if name.is_empty() {
-        fallback.into()
-    } else {
-        name.into()
+fn tool_status_from_patch(status: &PatchApplyStatus) -> ToolStatus {
+    match status {
+        PatchApplyStatus::InProgress => ToolStatus::Running,
+        PatchApplyStatus::Completed | PatchApplyStatus::Failed | PatchApplyStatus::Declined => {
+            ToolStatus::Done
+        }
+    }
+}
+
+fn summarize_file_changes(changes: Vec<FileUpdateChange>) -> Vec<FileChangeSummary> {
+    changes
+        .into_iter()
+        .map(|change| {
+            let stats = diff_stats(&change.diff);
+            FileChangeSummary {
+                path: change.path,
+                kind: file_change_kind(change.kind),
+                additions: stats.additions,
+                deletions: stats.deletions,
+            }
+        })
+        .collect()
+}
+
+fn file_change_kind(kind: PatchChangeKind) -> FileChangeKind {
+    match kind {
+        PatchChangeKind::Add => FileChangeKind::Add,
+        PatchChangeKind::Delete => FileChangeKind::Delete,
+        PatchChangeKind::Update { move_path } => FileChangeKind::Update {
+            move_path: move_path.map(|path| path.display().to_string()),
+        },
+    }
+}
+
+struct DiffStats {
+    additions: usize,
+    deletions: usize,
+}
+
+fn diff_stats(diff: &str) -> DiffStats {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    DiffStats {
+        additions,
+        deletions,
     }
 }
 
@@ -1428,5 +1610,29 @@ mod tests {
     #[test]
     fn missing_active_chat_starts_thread() {
         assert!(should_start_thread_for_turn(false, None));
+    }
+
+    #[test]
+    fn thread_title_prefers_name() {
+        assert_eq!(
+            thread_title(Some("Saved title"), "First prompt"),
+            "Saved title"
+        );
+    }
+
+    #[test]
+    fn thread_title_falls_back_to_preview() {
+        assert_eq!(
+            thread_title(None, "  First prompt  "),
+            "First prompt"
+        );
+    }
+
+    #[test]
+    fn thread_title_uses_default_when_name_and_preview_are_empty() {
+        assert_eq!(
+            thread_title(Some("   "), " "),
+            "Untitled Codex thread"
+        );
     }
 }

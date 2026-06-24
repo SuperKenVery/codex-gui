@@ -263,16 +263,20 @@ impl MessageState {
         collapse_tools: bool,
         hide_tools: bool,
         active_tool_tail: bool,
-    ) {
+    ) -> bool {
+        let changed = self.collapse_tools != collapse_tools
+            || self.hide_tools != hide_tools
+            || self.active_tool_tail != active_tool_tail;
         self.collapse_tools = collapse_tools;
         self.hide_tools = hide_tools;
         self.active_tool_tail = active_tool_tail;
+        changed
     }
 }
 
 fn markdown_body(message: &Message) -> Option<&str> {
     match message {
-        Message::Commentary(body) => Some(body),
+        Message::Notice(body) => Some(body),
         Message::Assistant { body, .. } => Some(body),
         Message::User(_) => None,
     }
@@ -288,7 +292,7 @@ pub enum Message {
         phase: AssistantPhase,
         tools: Vec<ToolCall>,
     },
-    Commentary(String),
+    Notice(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -304,14 +308,77 @@ pub enum StreamState {
 }
 
 #[derive(Clone)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub status: ToolStatus,
-    pub detail: String,
+pub enum ToolCall {
+    Command {
+        id: String,
+        command: String,
+        cwd: String,
+        status: ToolStatus,
+    },
+    FileChange {
+        id: String,
+        changes: Vec<FileChangeSummary>,
+        status: ToolStatus,
+    },
+    Mcp {
+        id: String,
+        server: String,
+        tool: String,
+        status: ToolStatus,
+    },
+    Dynamic {
+        id: String,
+        namespace: Option<String>,
+        tool: String,
+        status: ToolStatus,
+    },
 }
 
-#[derive(Clone, Copy)]
+impl ToolCall {
+    pub fn id(&self) -> &str {
+        match self {
+            ToolCall::Command { id, .. }
+            | ToolCall::FileChange { id, .. }
+            | ToolCall::Mcp { id, .. }
+            | ToolCall::Dynamic { id, .. } => id,
+        }
+    }
+
+    pub fn status(&self) -> ToolStatus {
+        match self {
+            ToolCall::Command { status, .. }
+            | ToolCall::FileChange { status, .. }
+            | ToolCall::Mcp { status, .. }
+            | ToolCall::Dynamic { status, .. } => *status,
+        }
+    }
+
+    pub fn set_status(&mut self, next_status: ToolStatus) {
+        match self {
+            ToolCall::Command { status, .. }
+            | ToolCall::FileChange { status, .. }
+            | ToolCall::Mcp { status, .. }
+            | ToolCall::Dynamic { status, .. } => *status = next_status,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FileChangeSummary {
+    pub path: String,
+    pub kind: FileChangeKind,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Clone)]
+pub enum FileChangeKind {
+    Add,
+    Delete,
+    Update { move_path: Option<String> },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
     Done,

@@ -75,7 +75,7 @@ impl Render for SideChat {
                             .child(format!("Temporary view of {thread_title}.")),
                     )
                     .child(render_message(
-                        &Message::Commentary(
+                        &Message::Notice(
                             "Side chats remain a UI-only view until promoted through thread/fork."
                                 .into(),
                         ),
