@@ -28,6 +28,70 @@ impl GuiState {
     pub fn active_project(&self) -> Option<Entity<ProjectState>> {
         self.projects.get(self.active_project).cloned()
     }
+
+    pub fn project_index_by_path(&self, path: &str, cx: &mut Context<Self>) -> Option<usize> {
+        self.projects
+            .iter()
+            .position(|project| project.read(cx).path.as_ref() == path)
+    }
+
+    pub fn select_project(&mut self, index: usize) {
+        self.active_project = index;
+        self.active_chat = 0;
+    }
+
+    pub fn select_chat(&mut self, index: usize) {
+        self.active_chat = index;
+    }
+
+    pub fn add_project(&mut self, project: Entity<ProjectState>) -> usize {
+        self.projects.push(project);
+        self.active_project = self.projects.len() - 1;
+        self.active_chat = 0;
+        self.active_project
+    }
+
+    pub fn select_first_chat(&mut self) {
+        self.active_chat = 0;
+    }
+
+    pub fn set_model(&mut self, model: String) {
+        self.chat_settings.model = model;
+        if let Some(option) = self
+            .available_models
+            .iter()
+            .find(|option| option.id == self.chat_settings.model)
+        {
+            self.chat_settings.effort = option.default_effort.clone();
+        }
+    }
+
+    pub fn set_effort(&mut self, effort: String) {
+        self.chat_settings.effort = effort;
+    }
+
+    pub fn set_permission_profile(&mut self, permission_profile: String) {
+        self.chat_settings.permission_profile = permission_profile;
+    }
+
+    pub fn set_approvals_reviewer(&mut self, approvals_reviewer: ApprovalReviewerMode) {
+        self.chat_settings.approvals_reviewer = approvals_reviewer;
+    }
+
+    pub fn set_available_models(&mut self, models: Vec<ModelOption>) {
+        if let Some(default_model) = models
+            .first()
+            .filter(|_| self.chat_settings.model.is_empty())
+        {
+            self.chat_settings.model = default_model.id.clone();
+            self.chat_settings.effort = default_model.default_effort.clone();
+        }
+        self.available_models = models;
+    }
+
+    pub fn set_permission_profiles(&mut self, profiles: Vec<PermissionProfileOption>) {
+        self.permission_profiles = profiles;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +208,36 @@ impl ProjectState {
             threads_loaded: false,
         }
     }
+
+    pub fn replace_loaded_chats(&mut self, chats: Vec<Entity<ChatState>>) {
+        self.chats = chats;
+        self.threads_loaded = true;
+    }
+
+    pub fn chat_index_by_id(&self, chat_id: &str, cx: &mut Context<Self>) -> Option<usize> {
+        self.chats
+            .iter()
+            .position(|chat| chat.read(cx).id == chat_id)
+    }
+
+    pub fn upsert_chat(
+        &mut self,
+        chat: Entity<ChatState>,
+        chat_id: &str,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        if let Some(index) = self.chat_index_by_id(chat_id, cx) {
+            self.chats[index] = chat;
+            index
+        } else {
+            self.chats.insert(0, chat);
+            0
+        }
+    }
+
+    pub fn append_chat(&mut self, chat: Entity<ChatState>) {
+        self.chats.push(chat);
+    }
 }
 
 pub struct ChatState {
@@ -166,6 +260,14 @@ impl ChatState {
             subtitle,
             messages,
         }
+    }
+
+    pub fn append_message(&mut self, message: Entity<MessageState>) {
+        self.messages.push(message);
+    }
+
+    pub fn set_title(&mut self, title: String) {
+        self.title = title.into();
     }
 }
 
@@ -394,6 +496,10 @@ impl BridgeState {
             status: "starting codex app-server".into(),
         }
     }
+
+    pub fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+    }
 }
 
 pub struct UiState {
@@ -409,6 +515,34 @@ impl UiState {
             new_chat_open: true,
             active_turn: None,
         }
+    }
+
+    pub fn open_new_chat(&mut self) {
+        self.new_chat_open = true;
+    }
+
+    pub fn close_new_chat(&mut self) {
+        self.new_chat_open = false;
+    }
+
+    pub fn toggle_side_chat(&mut self) {
+        self.side_chat_open = !self.side_chat_open;
+    }
+
+    pub fn start_turn(&mut self, thread_id: String, turn_id: String) {
+        self.active_turn = Some(ActiveTurn { thread_id, turn_id });
+    }
+
+    pub fn finish_turn(&mut self, thread_id: &str, turn_id: &str) {
+        if self.active_turn.as_ref().is_some_and(|active_turn| {
+            active_turn.thread_id == thread_id && active_turn.turn_id == turn_id
+        }) {
+            self.active_turn = None;
+        }
+    }
+
+    pub fn clear_active_turn(&mut self) {
+        self.active_turn = None;
     }
 }
 

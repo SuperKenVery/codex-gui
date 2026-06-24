@@ -93,7 +93,7 @@ impl ChatPanel {
         }
         let parent = self.parent.clone();
         cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.send_turn_text(text, cx));
+            let _ = parent.update(cx, |parent, cx| parent.submit_turn_text(text, cx));
         });
     }
 

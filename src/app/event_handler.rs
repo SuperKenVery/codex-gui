@@ -1,8 +1,8 @@
 use super::{CodexGui, thread_mapping::*};
 use crate::bridge::BridgeEvent;
 use crate::gui::{
-    ActiveTurn, AssistantPhase, ChatState, FileChangeSummary, Message, MessageState, ProjectState,
-    StreamState, ToolCall, ToolStatus,
+    AssistantPhase, ChatState, FileChangeSummary, Message, MessageState, ProjectState, StreamState,
+    ToolCall, ToolStatus,
 };
 use codex_app_server_protocol::{ServerNotification, Thread, ThreadItem};
 use gpui::{AppContext, Context, Entity};
@@ -41,10 +41,7 @@ impl CodexGui {
             }
             ServerNotification::TurnStarted(params) => {
                 self.ui_state.update(cx, |state, cx| {
-                    state.active_turn = Some(ActiveTurn {
-                        thread_id: params.thread_id,
-                        turn_id: params.turn.id,
-                    });
+                    state.start_turn(params.thread_id, params.turn.id);
                     cx.notify();
                 });
                 self.set_bridge_status("turn running", cx);
@@ -92,12 +89,8 @@ impl CodexGui {
                 let thread_id = params.thread_id;
                 let turn_id = params.turn.id;
                 self.ui_state.update(cx, |state, cx| {
-                    if state.active_turn.as_ref().is_some_and(|active_turn| {
-                        active_turn.thread_id == thread_id && active_turn.turn_id == turn_id
-                    }) {
-                        state.active_turn = None;
-                        cx.notify();
-                    }
+                    state.finish_turn(&thread_id, &turn_id);
+                    cx.notify();
                 });
                 self.finish_completed_tool_messages(&thread_id, cx);
                 self.set_bridge_status("turn complete", cx);
@@ -114,22 +107,22 @@ impl CodexGui {
         let chat = chat_entity_from_thread(thread, cx);
         if let Some(project) = self.active_project_entity(cx) {
             project.update(cx, |project, cx| {
-                upsert_chat(project, chat, &thread_id, cx);
+                project.upsert_chat(chat, &thread_id, cx);
                 cx.notify();
             });
         }
         self.state.update(cx, |state, cx| {
-            state.active_chat = 0;
+            state.select_first_chat();
             cx.notify();
         });
         self.ui_state.update(cx, |state, cx| {
-            state.new_chat_open = false;
+            state.close_new_chat();
             cx.notify();
         });
         self.set_bridge_status("thread ready", cx);
         if let Some(text) = self.pending_turn_text.take() {
             let settings = self.state.read(cx).chat_settings.clone();
-            self.send_turn_request(thread_id, text, settings, cx);
+            self.request_send_turn(thread_id, text, settings, cx);
             self.set_bridge_status("turn running", cx);
         }
     }
@@ -143,18 +136,13 @@ impl CodexGui {
                 .map(|chat| chat.read(cx).id == thread_id)
                 .unwrap_or(false);
             let loaded_chat_index = project.update(cx, |project, cx| {
-                upsert_chat(project, chat, &thread_id, cx);
-                let loaded_chat_index = project
-                    .chats
-                    .iter()
-                    .position(|chat| chat.read(cx).id == thread_id)
-                    .unwrap_or(0);
+                let loaded_chat_index = project.upsert_chat(chat, &thread_id, cx);
                 cx.notify();
                 loaded_chat_index
             });
             if should_keep_selected {
                 self.state.update(cx, |state, cx| {
-                    state.active_chat = loaded_chat_index;
+                    state.select_chat(loaded_chat_index);
                     cx.notify();
                 });
             }
@@ -164,7 +152,7 @@ impl CodexGui {
 
     pub(super) fn apply_bridge_error(&mut self, message: String, cx: &mut Context<Self>) {
         self.ui_state.update(cx, |state, cx| {
-            state.active_turn = None;
+            state.clear_active_turn();
             cx.notify();
         });
         self.set_bridge_status("codex app-server error", cx);
@@ -181,7 +169,7 @@ impl CodexGui {
                 )
             });
             project.update(cx, |project, cx| {
-                project.chats.push(chat);
+                project.append_chat(chat);
                 cx.notify();
             });
         }
@@ -394,7 +382,7 @@ impl CodexGui {
         };
         let message = cx.new(|cx| MessageState::new(message, cx));
         chat.update(cx, |chat, cx| {
-            chat.messages.push(message);
+            chat.append_message(message);
             cx.notify();
         });
     }
@@ -404,7 +392,7 @@ impl CodexGui {
             return;
         };
         chat.update(cx, |chat, cx| {
-            chat.title = title.into();
+            chat.set_title(title);
             cx.notify();
         });
     }
@@ -512,18 +500,17 @@ impl CodexGui {
             return;
         };
         message.update(cx, |message, cx| {
-            if let Message::Assistant { tools, .. } = &mut message.message {
-                if let Some(ToolCall::FileChange { changes, .. }) =
+            if let Message::Assistant { tools, .. } = &mut message.message
+                && let Some(ToolCall::FileChange { changes, .. }) =
                     tools.iter_mut().find(|tool| tool.id() == item_id)
-                {
-                    if let Some(last_change) = changes.last_mut() {
-                        let stats = diff_stats(delta);
-                        last_change.additions += stats.additions;
-                        last_change.deletions += stats.deletions;
-                    }
-                    message.touch();
-                    cx.notify();
+            {
+                if let Some(last_change) = changes.last_mut() {
+                    let stats = diff_stats(delta);
+                    last_change.additions += stats.additions;
+                    last_change.deletions += stats.deletions;
                 }
+                message.touch();
+                cx.notify();
             }
         });
     }
@@ -539,15 +526,14 @@ impl CodexGui {
             return;
         };
         message.update(cx, |message, cx| {
-            if let Message::Assistant { tools, .. } = &mut message.message {
-                if let Some(ToolCall::FileChange {
+            if let Message::Assistant { tools, .. } = &mut message.message
+                && let Some(ToolCall::FileChange {
                     changes: existing, ..
                 }) = tools.iter_mut().find(|tool| tool.id() == item_id)
-                {
-                    *existing = changes;
-                    message.touch();
-                    cx.notify();
-                }
+            {
+                *existing = changes;
+                message.touch();
+                cx.notify();
             }
         });
     }
@@ -567,12 +553,12 @@ impl CodexGui {
 
         if let Some(message) = self.find_tool_message(thread_id, item_id, cx) {
             message.update(cx, |message, cx| {
-                if let Message::Assistant { tools, .. } = &mut message.message {
-                    if let Some(tool) = tools.iter_mut().find(|tool| tool.id() == item_id) {
-                        tool.set_status(ToolStatus::Done);
-                        message.touch();
-                        cx.notify();
-                    }
+                if let Message::Assistant { tools, .. } = &mut message.message
+                    && let Some(tool) = tools.iter_mut().find(|tool| tool.id() == item_id)
+                {
+                    tool.set_status(ToolStatus::Done);
+                    message.touch();
+                    cx.notify();
                 }
             });
         }

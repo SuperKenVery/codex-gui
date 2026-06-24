@@ -1,7 +1,7 @@
 use super::CodexGui;
 use crate::gui::{
     AssistantPhase, ChatState, FileChangeKind, FileChangeSummary, Message, MessageState,
-    ProjectState, StreamState, ToolCall, ToolStatus,
+    StreamState, ToolCall, ToolStatus,
 };
 use codex_app_server_protocol::{
     CommandExecutionStatus, DynamicToolCallStatus, FileUpdateChange, McpToolCallStatus,
@@ -206,22 +206,6 @@ pub(super) fn assistant_phase(phase: Option<&MessagePhase>) -> AssistantPhase {
         Some(MessagePhase::Commentary) => AssistantPhase::Commentary,
         Some(MessagePhase::FinalAnswer) | None => AssistantPhase::FinalAnswer,
     }
-}
-
-pub(super) fn upsert_chat(
-    project: &mut ProjectState,
-    chat: Entity<ChatState>,
-    chat_id: &str,
-    cx: &mut Context<ProjectState>,
-) {
-    for index in 0..project.chats.len() {
-        let is_match = project.chats[index].read(cx).id == chat_id;
-        if is_match {
-            project.chats[index] = chat;
-            return;
-        }
-    }
-    project.chats.insert(0, chat);
 }
 
 pub(super) fn thread_status_label(status: &ThreadStatus) -> &'static str {
