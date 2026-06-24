@@ -1,13 +1,6 @@
 use super::CodexGui;
-use crate::gui::{
-    AssistantPhase, ChatState, FileChangeKind, FileChangeSummary, Message, MessageState,
-    StreamState, ToolCall, ToolStatus,
-};
-use codex_app_server_protocol::{
-    CommandExecutionStatus, DynamicToolCallStatus, FileUpdateChange, McpToolCallStatus,
-    PatchApplyStatus, PatchChangeKind, Thread, ThreadItem, ThreadStatus, UserInput,
-};
-use codex_protocol::models::MessagePhase;
+use crate::gui::{ChatState, HistoryEntryKind, HistoryKey, MessageState, StreamState};
+use codex_app_server_protocol::{Thread, ThreadItem, ThreadStatus, UserInput};
 use gpui::{AppContext, Context, Entity};
 use std::path::Path;
 
@@ -21,14 +14,13 @@ pub(super) fn chat_entity_from_thread(
         thread_status_label(&thread.status),
         thread.cwd.display()
     );
-    let thread_id = thread.id;
     let mut messages = Vec::new();
-    for turn in thread.turns {
-        for item in turn.items {
-            append_thread_item(&mut messages, item, cx);
+    for turn in &thread.turns {
+        for item in &turn.items {
+            append_thread_item(&mut messages, item.clone(), cx);
         }
     }
-    cx.new(|_| ChatState::new(thread_id, title.into(), subtitle.into(), messages))
+    cx.new(|_| ChatState::from_thread(thread, title.into(), subtitle.into(), messages))
 }
 
 pub(super) fn thread_title(name: Option<&str>, preview: &str) -> String {
@@ -48,10 +40,8 @@ pub(super) fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState>
             "No Codex threads".into(),
             "Click New to start one in this workspace".into(),
             vec![cx.new(|cx| {
-                MessageState::new(
-                    Message::Notice(
-                        "No persisted Codex threads were returned for this workspace.".into(),
-                    ),
+                MessageState::notice(
+                    "No persisted Codex threads were returned for this workspace.".into(),
                     cx,
                 )
             })],
@@ -74,96 +64,42 @@ pub(super) fn append_thread_item(
     cx: &mut Context<CodexGui>,
 ) {
     match item {
-        ThreadItem::UserMessage { content, .. } => {
+        ThreadItem::UserMessage { id, content, .. } => {
             let text = user_input_text(&content);
             if !text.is_empty() {
-                messages.push(cx.new(|cx| MessageState::new(Message::User(text), cx)));
+                messages.push(cx.new(|cx| {
+                    MessageState::item(
+                        HistoryKey::Item(id),
+                        HistoryEntryKind::User,
+                        None,
+                        StreamState::Complete,
+                        cx,
+                    )
+                }));
             }
         }
-        ThreadItem::AgentMessage {
-            id, text, phase, ..
-        } => {
+        ThreadItem::AgentMessage { id, text, .. } => {
             messages.push(cx.new(|cx| {
-                MessageState::new(
-                    Message::Assistant {
-                        id,
-                        body: text,
-                        state: StreamState::Complete,
-                        phase: assistant_phase(phase.as_ref()),
-                        tools: Vec::new(),
-                    },
+                MessageState::item(
+                    HistoryKey::Item(id.clone()),
+                    HistoryEntryKind::Assistant,
+                    Some(text),
+                    StreamState::Complete,
                     cx,
                 )
             }));
         }
-        ThreadItem::CommandExecution {
-            id,
-            command,
-            cwd,
-            status,
-            ..
-        } => {
-            push_tool_to_messages(
-                messages,
-                ToolCall::Command {
-                    id,
-                    command,
-                    cwd: cwd.display().to_string(),
-                    status: tool_status_from_command(&status),
-                },
-                cx,
-            );
+        ThreadItem::CommandExecution { id, .. } => {
+            push_tool_to_messages(messages, id, cx);
         }
-        ThreadItem::FileChange {
-            id,
-            changes,
-            status,
-        } => {
-            push_tool_to_messages(
-                messages,
-                ToolCall::FileChange {
-                    id,
-                    changes: summarize_file_changes(changes),
-                    status: tool_status_from_patch(&status),
-                },
-                cx,
-            );
+        ThreadItem::FileChange { id, .. } => {
+            push_tool_to_messages(messages, id, cx);
         }
-        ThreadItem::McpToolCall {
-            id,
-            server,
-            tool,
-            status,
-            ..
-        } => {
-            push_tool_to_messages(
-                messages,
-                ToolCall::Mcp {
-                    id,
-                    server,
-                    tool,
-                    status: tool_status_from_mcp(&status),
-                },
-                cx,
-            );
+        ThreadItem::McpToolCall { id, .. } => {
+            push_tool_to_messages(messages, id, cx);
         }
-        ThreadItem::DynamicToolCall {
-            id,
-            namespace,
-            tool,
-            status,
-            ..
-        } => {
-            push_tool_to_messages(
-                messages,
-                ToolCall::Dynamic {
-                    id,
-                    namespace,
-                    tool,
-                    status: tool_status_from_dynamic(&status),
-                },
-                cx,
-            );
+        ThreadItem::DynamicToolCall { id, .. } => {
+            push_tool_to_messages(messages, id, cx);
         }
         _ => {}
     }
@@ -171,41 +107,25 @@ pub(super) fn append_thread_item(
 
 pub(super) fn push_tool_to_messages(
     messages: &mut Vec<Entity<MessageState>>,
-    tool: ToolCall,
+    tool_id: String,
     cx: &mut Context<CodexGui>,
 ) {
     for message in messages.iter().rev() {
-        let is_assistant = matches!(&message.read(cx).message, Message::Assistant { .. });
+        let is_assistant = matches!(message.read(cx).kind, HistoryEntryKind::Assistant);
         if is_assistant {
-            message.update(cx, |message, cx| {
-                if let Message::Assistant { tools, .. } = &mut message.message {
-                    tools.push(tool);
-                    cx.notify();
-                }
-            });
             return;
         }
     }
 
     messages.push(cx.new(|cx| {
-        MessageState::new(
-            Message::Assistant {
-                id: format!("tool-group-{}", tool.id()),
-                body: String::new(),
-                state: StreamState::Complete,
-                phase: AssistantPhase::Commentary,
-                tools: vec![tool],
-            },
+        MessageState::item(
+            HistoryKey::ToolGroup(tool_id),
+            HistoryEntryKind::ToolGroup,
+            None,
+            StreamState::Complete,
             cx,
         )
     }));
-}
-
-pub(super) fn assistant_phase(phase: Option<&MessagePhase>) -> AssistantPhase {
-    match phase {
-        Some(MessagePhase::Commentary) => AssistantPhase::Commentary,
-        Some(MessagePhase::FinalAnswer) | None => AssistantPhase::FinalAnswer,
-    }
 }
 
 pub(super) fn thread_status_label(status: &ThreadStatus) -> &'static str {
@@ -214,87 +134,6 @@ pub(super) fn thread_status_label(status: &ThreadStatus) -> &'static str {
         ThreadStatus::Idle => "idle",
         ThreadStatus::SystemError => "system error",
         ThreadStatus::Active { .. } => "active",
-    }
-}
-
-pub(super) fn tool_status_from_command(status: &CommandExecutionStatus) -> ToolStatus {
-    match status {
-        CommandExecutionStatus::InProgress => ToolStatus::Running,
-        CommandExecutionStatus::Completed
-        | CommandExecutionStatus::Failed
-        | CommandExecutionStatus::Declined => ToolStatus::Done,
-    }
-}
-
-pub(super) fn tool_status_from_mcp(status: &McpToolCallStatus) -> ToolStatus {
-    match status {
-        McpToolCallStatus::InProgress => ToolStatus::Running,
-        McpToolCallStatus::Completed | McpToolCallStatus::Failed => ToolStatus::Done,
-    }
-}
-
-pub(super) fn tool_status_from_dynamic(status: &DynamicToolCallStatus) -> ToolStatus {
-    match status {
-        DynamicToolCallStatus::InProgress => ToolStatus::Running,
-        DynamicToolCallStatus::Completed | DynamicToolCallStatus::Failed => ToolStatus::Done,
-    }
-}
-
-pub(super) fn tool_status_from_patch(status: &PatchApplyStatus) -> ToolStatus {
-    match status {
-        PatchApplyStatus::InProgress => ToolStatus::Running,
-        PatchApplyStatus::Completed | PatchApplyStatus::Failed | PatchApplyStatus::Declined => {
-            ToolStatus::Done
-        }
-    }
-}
-
-pub(super) fn summarize_file_changes(changes: Vec<FileUpdateChange>) -> Vec<FileChangeSummary> {
-    changes
-        .into_iter()
-        .map(|change| {
-            let stats = diff_stats(&change.diff);
-            FileChangeSummary {
-                path: change.path,
-                kind: file_change_kind(change.kind),
-                additions: stats.additions,
-                deletions: stats.deletions,
-            }
-        })
-        .collect()
-}
-
-pub(super) fn file_change_kind(kind: PatchChangeKind) -> FileChangeKind {
-    match kind {
-        PatchChangeKind::Add => FileChangeKind::Add,
-        PatchChangeKind::Delete => FileChangeKind::Delete,
-        PatchChangeKind::Update { move_path } => FileChangeKind::Update {
-            move_path: move_path.map(|path| path.display().to_string()),
-        },
-    }
-}
-
-pub(super) struct DiffStats {
-    pub(super) additions: usize,
-    pub(super) deletions: usize,
-}
-
-pub(super) fn diff_stats(diff: &str) -> DiffStats {
-    let mut additions = 0;
-    let mut deletions = 0;
-    for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            additions += 1;
-        } else if line.starts_with('-') {
-            deletions += 1;
-        }
-    }
-    DiffStats {
-        additions,
-        deletions,
     }
 }
 

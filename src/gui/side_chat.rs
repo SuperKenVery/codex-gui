@@ -1,4 +1,4 @@
-use crate::gui::{GuiState, Message, widgets::render_message};
+use crate::gui::{GuiState, widgets::render_notice};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, px,
 };
@@ -74,11 +74,8 @@ impl Render for SideChat {
                             .p_3()
                             .child(format!("Temporary view of {thread_title}.")),
                     )
-                    .child(render_message(
-                        &Message::Notice(
-                            "Side chats remain a UI-only view until promoted through thread/fork."
-                                .into(),
-                        ),
+                    .child(render_notice(
+                        "Side chats remain a UI-only view until promoted through thread/fork.",
                         cx.theme(),
                     )),
             )

@@ -1,9 +1,11 @@
 use std::{collections::HashSet, time::Duration};
 
 use crate::gui::{
-    AssistantPhase, ChatState, GuiState, Message, MessageState,
-    widgets::{render_message, render_message_state, render_worked_summary},
+    ChatState, GuiState, HistoryKey, MessageState, StreamState,
+    widgets::{render_notice, render_thread_item_state, render_worked_summary},
 };
+use codex_app_server_protocol::ThreadItem;
+use codex_protocol::models::MessagePhase;
 use gpui::{
     AnyElement, Context, Entity, EntityId, FollowMode, IntoElement, ListAlignment, ListState,
     ParentElement, Render, Styled, Subscription, Window, div, list, prelude::*, px,
@@ -84,13 +86,9 @@ impl ChatHistory {
 
 impl Render for ChatHistory {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let messages = self
-            .active_chat
-            .as_ref()
-            .map(|chat| chat.read(cx).messages.clone());
+        let chat = self.active_chat.clone();
 
-        messages
-            .map(|messages| self.render_message_list(messages, cx))
+        chat.map(|chat| self.render_message_list(chat, cx))
             .unwrap_or_else(|| {
                 div()
                     .id("message-list")
@@ -101,8 +99,8 @@ impl Render for ChatHistory {
                     .gap_3()
                     .overflow_x_hidden()
                     .overflow_y_scroll()
-                    .child(render_message(
-                        &Message::Notice("Loading Codex threads from the app server.".into()),
+                    .child(render_notice(
+                        "Loading Codex threads from the app server.",
                         cx.theme(),
                     ))
                     .into_any_element()
@@ -110,39 +108,26 @@ impl Render for ChatHistory {
     }
 }
 
-impl Render for MessageState {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        render_message_state(
-            self,
-            self.collapse_tools,
-            self.hide_tools,
-            self.active_tool_tail,
-            cx.theme(),
-            window,
-            cx.listener(|message, _, _, cx| {
-                message.toggle_tools();
-                cx.notify();
-            }),
-        )
-    }
-}
-
 impl ChatHistory {
     fn render_message_list(
         &mut self,
-        messages: Vec<Entity<MessageState>>,
+        chat: Entity<ChatState>,
         cx: &mut Context<ChatHistory>,
     ) -> AnyElement {
+        let messages = chat.read(cx).messages.clone();
         self.sync_message_subscriptions(&messages, cx);
-        let rows = self.rows_from_messages(&messages, cx);
-        self.sync_list_rows(&rows);
+        let rows = self.rows_from_messages(&chat, &messages, cx);
+        self.sync_list_rows(&rows, cx);
 
         let history = cx.entity().clone();
+        let chat_for_render = chat.clone();
         let rows_for_render = rows.clone();
         list(
             self.list_state.clone(),
-            move |index, _window, cx| match rows_for_render.get(index).cloned() {
-                Some(HistoryRow::Message(message)) => message.into_any_element(),
+            move |index, window, cx| match rows_for_render.get(index).cloned() {
+                Some(HistoryRow::Message(message)) => {
+                    render_history_message(&chat_for_render, &message, window, cx)
+                }
                 Some(HistoryRow::Summary {
                     turn_id,
                     duration,
@@ -173,15 +158,17 @@ impl ChatHistory {
 
     fn rows_from_messages(
         &self,
+        chat: &Entity<ChatState>,
         messages: &[Entity<MessageState>],
         cx: &mut Context<ChatHistory>,
     ) -> Vec<HistoryRow> {
         let mut rows = Vec::new();
         let mut index = 0;
         while index < messages.len() {
-            if is_user_message(&messages[index], cx) {
-                let next_turn = next_user_index(messages, index + 1, cx).unwrap_or(messages.len());
-                if let Some(fold) = completed_turn_fold(messages, index, next_turn, cx) {
+            if is_user_message(chat, &messages[index], cx) {
+                let next_turn =
+                    next_user_index(chat, messages, index + 1, cx).unwrap_or(messages.len());
+                if let Some(fold) = completed_turn_fold(chat, messages, index, next_turn, cx) {
                     let turn_id = messages[index].entity_id();
                     configure_message(&messages[index], true, false, false, cx);
                     rows.push(HistoryRow::Message(messages[index].clone()));
@@ -206,7 +193,7 @@ impl ChatHistory {
                 }
             }
 
-            let active_tail = is_active_tool_tail(messages, index, cx);
+            let active_tail = is_active_tool_tail(chat, messages, index, cx);
             configure_message(&messages[index], true, false, active_tail, cx);
             rows.push(HistoryRow::Message(messages[index].clone()));
             index += 1;
@@ -214,8 +201,8 @@ impl ChatHistory {
         rows
     }
 
-    fn sync_list_rows(&mut self, rows: &[HistoryRow]) {
-        let next_keys = rows.iter().map(HistoryRow::key).collect::<Vec<_>>();
+    fn sync_list_rows(&mut self, rows: &[HistoryRow], cx: &mut Context<ChatHistory>) {
+        let next_keys = rows.iter().map(|row| row.key(cx)).collect::<Vec<_>>();
         if next_keys == self.row_keys {
             return;
         }
@@ -253,12 +240,12 @@ impl ChatHistory {
 
     fn rebuild_rows(&mut self, cx: &mut Context<ChatHistory>) {
         let Some(chat) = &self.active_chat else {
-            self.sync_list_rows(&[]);
+            self.sync_list_rows(&[], cx);
             return;
         };
         let messages = chat.read(cx).messages.clone();
-        let rows = self.rows_from_messages(&messages, cx);
-        self.sync_list_rows(&rows);
+        let rows = self.rows_from_messages(chat, &messages, cx);
+        self.sync_list_rows(&rows, cx);
     }
 }
 
@@ -273,17 +260,17 @@ enum HistoryRow {
 }
 
 impl HistoryRow {
-    fn key(&self) -> HistoryRowKey {
+    fn key(&self, cx: &mut Context<ChatHistory>) -> HistoryRowKey {
         match self {
-            HistoryRow::Message(message) => HistoryRowKey::Message(message.entity_id()),
+            HistoryRow::Message(message) => HistoryRowKey::Message(message.read(cx).key.clone()),
             HistoryRow::Summary { turn_id, .. } => HistoryRowKey::Summary(*turn_id),
         }
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 enum HistoryRowKey {
-    Message(EntityId),
+    Message(HistoryKey),
     Summary(EntityId),
 }
 
@@ -317,12 +304,43 @@ fn subscribe_to_messages(
         .collect()
 }
 
+fn render_history_message(
+    chat: &Entity<ChatState>,
+    message: &Entity<MessageState>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    let message_for_toggle = message.clone();
+    let chat = chat.read(cx);
+    let message_state = message.read(cx);
+    let item = chat.item_for_state(&message_state);
+    let tools = chat.tools_for_state(&message_state);
+    render_thread_item_state(
+        item,
+        &tools,
+        &message_state,
+        message_state.collapse_tools,
+        message_state.hide_tools,
+        message_state.active_tool_tail,
+        cx.theme(),
+        window,
+        move |_, _, cx| {
+            message_for_toggle.update(cx, |message, cx| {
+                message.toggle_tools();
+                cx.notify();
+            });
+        },
+    )
+    .into_any_element()
+}
+
 struct TurnFold {
     final_index: usize,
     duration: Duration,
 }
 
 fn completed_turn_fold(
+    chat: &Entity<ChatState>,
     messages: &[Entity<MessageState>],
     user_index: usize,
     next_turn: usize,
@@ -330,31 +348,28 @@ fn completed_turn_fold(
 ) -> Option<TurnFold> {
     let final_index = (user_index + 1..next_turn).rev().find(|index| {
         let message = messages[*index].read(cx);
-        matches!(
-            &message.message,
-            Message::Assistant {
-                body,
-                state: crate::gui::StreamState::Complete,
-                phase: AssistantPhase::FinalAnswer,
-                tools,
-                ..
-            } if !body.trim().is_empty()
-                && tools
-                    .iter()
-                    .all(|tool| matches!(tool.status(), crate::gui::ToolStatus::Done))
-        )
+        let chat = chat.read(cx);
+        let Some(ThreadItem::AgentMessage { text, phase, .. }) = chat.item_for_state(&message)
+        else {
+            return false;
+        };
+        !text.trim().is_empty()
+            && matches!(message.stream_state, StreamState::Complete)
+            && is_final_answer(phase.as_ref())
+            && chat.has_done_tools_for_state(&message)
     })?;
 
-    if next_turn == messages.len() && has_working_message(&messages[user_index + 1..next_turn], cx)
+    if next_turn == messages.len()
+        && has_working_message(chat, &messages[user_index + 1..next_turn], cx)
     {
         return None;
     }
 
     let has_progress = (user_index + 1..next_turn).any(|index| index != final_index);
-    let final_has_tools = match &messages[final_index].read(cx).message {
-        Message::Assistant { tools, .. } => !tools.is_empty(),
-        _ => false,
-    };
+    let final_has_tools = !chat
+        .read(cx)
+        .tools_for_state(&messages[final_index].read(cx))
+        .is_empty();
     if !has_progress && !final_has_tools {
         return None;
     }
@@ -370,20 +385,26 @@ fn completed_turn_fold(
     })
 }
 
-fn has_working_message(messages: &[Entity<MessageState>], cx: &mut Context<ChatHistory>) -> bool {
+fn has_working_message(
+    chat: &Entity<ChatState>,
+    messages: &[Entity<MessageState>],
+    cx: &mut Context<ChatHistory>,
+) -> bool {
     messages.iter().any(|message| {
         let message = message.read(cx);
-        matches!(
-            &message.message,
-            Message::Assistant {
-                state: crate::gui::StreamState::Streaming,
-                ..
-            }
-        )
+        if !matches!(message.stream_state, StreamState::Streaming) {
+            return false;
+        }
+        match chat.read(cx).item_for_state(&message) {
+            Some(ThreadItem::AgentMessage { .. }) => true,
+            Some(item) => is_tool_item(item),
+            None => false,
+        }
     })
 }
 
 fn is_active_tool_tail(
+    chat: &Entity<ChatState>,
     messages: &[Entity<MessageState>],
     index: usize,
     cx: &mut Context<ChatHistory>,
@@ -393,26 +414,42 @@ fn is_active_tool_tail(
     }
 
     let message = messages[index].read(cx);
+    matches!(message.stream_state, StreamState::Streaming)
+        && !chat.read(cx).tools_for_state(&message).is_empty()
+}
+
+fn is_user_message(
+    chat: &Entity<ChatState>,
+    message: &Entity<MessageState>,
+    cx: &mut Context<ChatHistory>,
+) -> bool {
     matches!(
-        &message.message,
-        Message::Assistant {
-            state: crate::gui::StreamState::Streaming,
-            tools,
-            ..
-        } if !tools.is_empty()
+        chat.read(cx).item_for_state(&message.read(cx)),
+        Some(ThreadItem::UserMessage { .. })
     )
 }
 
-fn is_user_message(message: &Entity<MessageState>, cx: &mut Context<ChatHistory>) -> bool {
-    matches!(&message.read(cx).message, Message::User(_))
-}
-
 fn next_user_index(
+    chat: &Entity<ChatState>,
     messages: &[Entity<MessageState>],
     start: usize,
     cx: &mut Context<ChatHistory>,
 ) -> Option<usize> {
-    (start..messages.len()).find(|index| is_user_message(&messages[*index], cx))
+    (start..messages.len()).find(|index| is_user_message(chat, &messages[*index], cx))
+}
+
+fn is_final_answer(phase: Option<&MessagePhase>) -> bool {
+    matches!(phase, Some(MessagePhase::FinalAnswer) | None)
+}
+
+fn is_tool_item(item: &ThreadItem) -> bool {
+    matches!(
+        item,
+        ThreadItem::CommandExecution { .. }
+            | ThreadItem::FileChange { .. }
+            | ThreadItem::McpToolCall { .. }
+            | ThreadItem::DynamicToolCall { .. }
+    )
 }
 
 fn active_chat_entity(

@@ -1,8 +1,11 @@
 use std::time::Duration;
 
-use crate::gui::{
-    AssistantPhase, FileChangeKind, Message, MessageState, StreamState, ToolCall, ToolStatus,
+use crate::gui::{MessageState, StreamState};
+use codex_app_server_protocol::{
+    CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, PatchApplyStatus,
+    PatchChangeKind, ThreadItem, UserInput,
 };
+use codex_protocol::models::MessagePhase;
 use gpui::{
     App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
     prelude::*, px, rems,
@@ -70,12 +73,14 @@ pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
         .child(label)
 }
 
-pub(super) fn render_message(message: &Message, theme: &Theme) -> impl IntoElement {
-    render_message_view(message, None, false, false, false, theme, None, None)
+pub(super) fn render_notice(body: &str, theme: &Theme) -> impl IntoElement {
+    notice_message_block(body, None, theme, None)
 }
 
-pub(super) fn render_message_state(
-    message: &MessageState,
+pub(super) fn render_thread_item_state(
+    item: Option<&ThreadItem>,
+    tools: &[&ThreadItem],
+    state: &MessageState,
     collapse_tools: bool,
     hide_tools: bool,
     active_tool_tail: bool,
@@ -83,16 +88,44 @@ pub(super) fn render_message_state(
     window: &mut Window,
     on_toggle_tools: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    render_message_view(
-        &message.message,
-        message.body_view.as_ref(),
-        collapse_tools,
-        hide_tools,
-        active_tool_tail,
-        theme,
-        Some((message.tools_expanded, Box::new(on_toggle_tools))),
-        Some((message.zed_markdown.as_ref(), window)),
-    )
+    match item {
+        Some(ThreadItem::UserMessage { content, .. }) => {
+            user_message_block(&user_input_text(content), theme)
+        }
+        Some(ThreadItem::AgentMessage { text, phase, .. }) => render_assistant_message(
+            text,
+            message_phase(phase.as_ref()),
+            state.stream_state,
+            tools,
+            state.body_view.as_ref(),
+            collapse_tools,
+            hide_tools,
+            active_tool_tail,
+            theme,
+            Some((state.tools_expanded, Box::new(on_toggle_tools))),
+            Some((state.zed_markdown.as_ref(), window)),
+        ),
+        Some(item) if is_tool_item(item) => render_assistant_message(
+            "",
+            AssistantPhase::Commentary,
+            state.stream_state,
+            tools,
+            state.body_view.as_ref(),
+            collapse_tools,
+            hide_tools,
+            active_tool_tail,
+            theme,
+            Some((state.tools_expanded, Box::new(on_toggle_tools))),
+            Some((state.zed_markdown.as_ref(), window)),
+        ),
+        None => notice_message_block(
+            &state.rendered_body,
+            state.body_view.as_ref(),
+            theme,
+            Some((state.zed_markdown.as_ref(), window)),
+        ),
+        Some(_) => div(),
+    }
 }
 
 pub(super) fn render_worked_summary(
@@ -116,8 +149,17 @@ pub(super) fn render_worked_summary(
         )
 }
 
-fn render_message_view(
-    message: &Message,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssistantPhase {
+    Commentary,
+    FinalAnswer,
+}
+
+fn render_assistant_message(
+    body: &str,
+    phase: AssistantPhase,
+    stream_state: StreamState,
+    tools: &[&ThreadItem],
     body_view: Option<&Entity<TextViewState>>,
     collapse_tools: bool,
     hide_tools: bool,
@@ -129,57 +171,45 @@ fn render_message_view(
     )>,
     zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
-    match message {
-        Message::User(body) => user_message_block(body, theme),
-        Message::Notice(body) => notice_message_block(body, body_view, theme, zed_markdown),
-        Message::Assistant {
-            body,
-            state,
-            phase,
-            tools,
-            ..
-        } => {
-            let mut block = message_block(
-                match (*phase, state) {
-                    (AssistantPhase::Commentary, _) => "",
-                    (AssistantPhase::FinalAnswer, StreamState::Complete) => "Codex",
-                    (AssistantPhase::FinalAnswer, StreamState::Streaming) => "Codex is working",
-                },
-                body,
-                body_view,
-                theme,
-                zed_markdown,
-            );
+    let mut block = message_block(
+        match (phase, stream_state) {
+            (AssistantPhase::Commentary, _) => "",
+            (AssistantPhase::FinalAnswer, StreamState::Complete) => "Codex",
+            (AssistantPhase::FinalAnswer, StreamState::Streaming) => "Codex is working",
+        },
+        body,
+        body_view,
+        theme,
+        zed_markdown,
+    );
 
-            if !hide_tools && !tools.is_empty() {
-                let should_collapse = collapse_tools && !active_tool_tail;
-                let expanded = tool_toggle
-                    .as_ref()
-                    .map(|(expanded, _)| *expanded)
-                    .unwrap_or(false);
-                let tools_view = if should_collapse {
-                    let mut tool_group = div().flex().flex_col().gap_2();
-                    let summary = match tool_toggle {
-                        Some((_, on_toggle)) => render_tool_summary(tools, theme, expanded)
-                            .id(format!("tool-summary-{}", tools[0].id()))
-                            .on_click(on_toggle)
-                            .into_any_element(),
-                        None => render_tool_summary(tools, theme, expanded).into_any_element(),
-                    };
-                    tool_group = tool_group.child(summary);
-                    if expanded {
-                        tool_group = tool_group.child(render_tool_list(tools, theme));
-                    }
-                    tool_group.into_any_element()
-                } else {
-                    render_tool_list(tools, theme).into_any_element()
-                };
-                block = block.child(tools_view);
+    if !hide_tools && !tools.is_empty() {
+        let should_collapse = collapse_tools && !active_tool_tail;
+        let expanded = tool_toggle
+            .as_ref()
+            .map(|(expanded, _)| *expanded)
+            .unwrap_or(false);
+        let tools_view = if should_collapse {
+            let mut tool_group = div().flex().flex_col().gap_2();
+            let summary = match tool_toggle {
+                Some((_, on_toggle)) => render_tool_summary(tools, theme, expanded)
+                    .id(format!("tool-summary-{}", tools[0].id()))
+                    .on_click(on_toggle)
+                    .into_any_element(),
+                None => render_tool_summary(tools, theme, expanded).into_any_element(),
+            };
+            tool_group = tool_group.child(summary);
+            if expanded {
+                tool_group = tool_group.child(render_tool_list(tools, theme));
             }
-
-            block
-        }
+            tool_group.into_any_element()
+        } else {
+            render_tool_list(tools, theme).into_any_element()
+        };
+        block = block.child(tools_view);
     }
+
+    block
 }
 
 fn notice_message_block(
@@ -284,11 +314,8 @@ fn zed_markdown_style(window: &Window, theme: &Theme) -> ZedMarkdownStyle {
     style
 }
 
-fn render_tool_summary(tools: &[ToolCall], theme: &Theme, expanded: bool) -> gpui::Div {
-    let running = tools
-        .iter()
-        .filter(|tool| matches!(tool.status(), ToolStatus::Running))
-        .count();
+fn render_tool_summary(tools: &[&ThreadItem], theme: &Theme, expanded: bool) -> gpui::Div {
+    let running = tools.iter().filter(|tool| !tool_item_done(tool)).count();
     let label = if running > 0 {
         format!(
             "Running {} {}",
@@ -328,18 +355,18 @@ fn disclosure_icon(expanded: bool, theme: &Theme) -> impl IntoElement {
     .text_color(theme.muted_foreground)
 }
 
-fn render_tool_list(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
-    tools
-        .iter()
-        .fold(div().w_full().min_w_0().flex().flex_col().gap_2(), |list, tool| {
-            list.child(render_tool_call(tool, theme))
-        })
+fn render_tool_list(tools: &[&ThreadItem], theme: &Theme) -> gpui::Div {
+    tools.iter().fold(
+        div().w_full().min_w_0().flex().flex_col().gap_2(),
+        |list, tool| list.child(render_tool_call(tool, theme)),
+    )
 }
 
-fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
-    let (label, color) = match tool.status() {
-        ToolStatus::Running => ("running", theme.warning_foreground),
-        ToolStatus::Done => ("done", theme.success_foreground),
+fn render_tool_call(tool: &ThreadItem, theme: &Theme) -> gpui::Div {
+    let (label, color) = if tool_item_done(tool) {
+        ("done", theme.success_foreground)
+    } else {
+        ("running", theme.warning_foreground)
     };
     let (title, detail) = tool_call_text(tool);
 
@@ -377,40 +404,32 @@ fn render_tool_call(tool: &ToolCall, theme: &Theme) -> gpui::Div {
                         .child(detail),
                 ),
         )
-        .child(
-            div()
-                .flex_none()
-                .text_color(color)
-                .text_xs()
-                .child(label),
-        )
+        .child(div().flex_none().text_color(color).text_xs().child(label))
 }
 
-fn tool_call_text(tool: &ToolCall) -> (String, String) {
+fn tool_call_text(tool: &ThreadItem) -> (String, String) {
     match tool {
-        ToolCall::Command { command, cwd, .. } => ("Terminal".into(), format!("{command} ({cwd})")),
-        ToolCall::FileChange { changes, .. } => {
+        ThreadItem::CommandExecution { command, cwd, .. } => {
+            ("Terminal".into(), format!("{command} ({})", cwd.display()))
+        }
+        ThreadItem::FileChange { changes, .. } => {
             let detail = if changes.is_empty() {
                 "Preparing file edits".into()
             } else {
                 changes
                     .iter()
                     .map(|change| {
-                        let action = match &change.kind {
-                            FileChangeKind::Add => "added",
-                            FileChangeKind::Delete => "deleted",
-                            FileChangeKind::Update { move_path: None } => "edited",
-                            FileChangeKind::Update { move_path: Some(_) } => "moved",
-                        };
+                        let action = file_change_action(&change.kind);
                         let path = match &change.kind {
-                            FileChangeKind::Update {
+                            PatchChangeKind::Update {
                                 move_path: Some(move_path),
-                            } => format!("{} -> {}", change.path, move_path),
+                            } => format!("{} -> {}", change.path, move_path.display()),
                             _ => change.path.clone(),
                         };
+                        let stats = diff_stats(&change.diff);
                         format!(
                             "{action} {path} (+{} -{})",
-                            change.additions, change.deletions
+                            stats.additions, stats.deletions
                         )
                     })
                     .collect::<Vec<_>>()
@@ -418,8 +437,10 @@ fn tool_call_text(tool: &ToolCall) -> (String, String) {
             };
             ("File edit".into(), detail)
         }
-        ToolCall::Mcp { server, tool, .. } => ("MCP tool".into(), format!("{server}.{tool}")),
-        ToolCall::Dynamic {
+        ThreadItem::McpToolCall { server, tool, .. } => {
+            ("MCP tool".into(), format!("{server}.{tool}"))
+        }
+        ThreadItem::DynamicToolCall {
             namespace, tool, ..
         } => {
             let detail = namespace
@@ -428,6 +449,82 @@ fn tool_call_text(tool: &ToolCall) -> (String, String) {
                 .unwrap_or_else(|| tool.clone());
             ("Tool call".into(), detail)
         }
+        _ => ("Tool call".into(), String::new()),
+    }
+}
+
+fn user_input_text(content: &[UserInput]) -> String {
+    content
+        .iter()
+        .filter_map(|input| match input {
+            UserInput::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn message_phase(phase: Option<&MessagePhase>) -> AssistantPhase {
+    match phase {
+        Some(MessagePhase::Commentary) => AssistantPhase::Commentary,
+        Some(MessagePhase::FinalAnswer) | None => AssistantPhase::FinalAnswer,
+    }
+}
+
+fn is_tool_item(item: &ThreadItem) -> bool {
+    matches!(
+        item,
+        ThreadItem::CommandExecution { .. }
+            | ThreadItem::FileChange { .. }
+            | ThreadItem::McpToolCall { .. }
+            | ThreadItem::DynamicToolCall { .. }
+    )
+}
+
+fn tool_item_done(item: &ThreadItem) -> bool {
+    match item {
+        ThreadItem::CommandExecution { status, .. } => {
+            !matches!(status, CommandExecutionStatus::InProgress)
+        }
+        ThreadItem::FileChange { status, .. } => !matches!(status, PatchApplyStatus::InProgress),
+        ThreadItem::McpToolCall { status, .. } => !matches!(status, McpToolCallStatus::InProgress),
+        ThreadItem::DynamicToolCall { status, .. } => {
+            !matches!(status, DynamicToolCallStatus::InProgress)
+        }
+        _ => false,
+    }
+}
+
+fn file_change_action(kind: &PatchChangeKind) -> &'static str {
+    match kind {
+        PatchChangeKind::Add => "added",
+        PatchChangeKind::Delete => "deleted",
+        PatchChangeKind::Update { move_path: None } => "edited",
+        PatchChangeKind::Update { move_path: Some(_) } => "moved",
+    }
+}
+
+struct DiffStats {
+    additions: usize,
+    deletions: usize,
+}
+
+fn diff_stats(diff: &str) -> DiffStats {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    DiffStats {
+        additions,
+        deletions,
     }
 }
 
