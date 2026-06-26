@@ -107,6 +107,7 @@ impl CodexGui {
                     cx.notify();
                 });
                 self.finish_completed_tool_messages(&thread_id, cx);
+                self.notify_chat(&thread_id, cx);
                 self.set_bridge_status("turn complete", cx);
             }
             ServerNotification::Error(params) => {
@@ -251,6 +252,7 @@ impl CodexGui {
             }
             item => self.mark_item_complete(thread_id, item.id(), cx),
         }
+        self.notify_chat(thread_id, cx);
     }
 
     pub(super) fn active_project_entity(
@@ -285,6 +287,13 @@ impl CodexGui {
             }
         }
         None
+    }
+
+    fn notify_chat(&self, thread_id: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
+            return;
+        };
+        chat.update(cx, |_, cx| cx.notify());
     }
 
     fn append_notice(&self, thread_id: &str, body: String, cx: &mut Context<Self>) {
@@ -392,9 +401,8 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, cx| {
+        chat.update(cx, |chat, _| {
             chat.append_agent_text_delta(item_id, delta);
-            cx.notify();
         });
     }
 
@@ -408,9 +416,8 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, cx| {
+        chat.update(cx, |chat, _| {
             chat.append_command_output_delta(item_id, delta);
-            cx.notify();
         });
     }
 
@@ -424,9 +431,8 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, cx| {
+        chat.update(cx, |chat, _| {
             chat.append_file_change_output_delta(item_id, delta);
-            cx.notify();
         });
     }
 
@@ -440,9 +446,8 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, cx| {
+        chat.update(cx, |chat, _| {
             chat.update_file_change_item(item_id, changes);
-            cx.notify();
         });
     }
 

@@ -27,3 +27,34 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac10
 
 [patch."https://github.com/openai/codex.git"]
 codex-shell-command = { path = "vendor/codex-shell-command" }
+
+[profile.dev]
+split-debuginfo = "unpacked"
+incremental = true
+codegen-units = 16
+
+# mirror configuration for crates compiled for the build platform
+# (without this cargo will compile ~400 crates twice)
+[profile.dev.build-override]
+codegen-units = 16
+split-debuginfo = "unpacked"
+debug = true
+
+[profile.dev.package]
+# proc-macros start
+gpui_macros = { opt-level = 3 }
+derive_refineable = { opt-level = 3 }
+settings_macros = { opt-level = 3 }
+ui_macros = { opt-level = 3 }
+util_macros = { opt-level = 3 }
+quote = { opt-level = 3 }
+syn = { opt-level = 3 }
+proc-macro2 = { opt-level = 3 }
+# proc-macros end
+
+taffy = { opt-level = 3 }
+resvg = { opt-level = 3 }
+wasmtime = { opt-level = 3 }
+
+# Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
+zed_actions = { codegen-units = 1 }

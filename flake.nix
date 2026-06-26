@@ -33,7 +33,9 @@
             buildInputs = lib.optionals pkgs.stdenv.isDarwin [
               pkgs.apple-sdk
               pkgs.libiconv
-            ];
+            ] ++ (with pkgs; [
+              cmake
+            ]);
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           codex-gui = craneLib.buildPackage (commonArgs // {

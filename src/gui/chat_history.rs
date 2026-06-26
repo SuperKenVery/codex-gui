@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, rc::Rc, time::Duration};
 
 use crate::gui::{
     ChatState, GuiState, HistoryKey, MessageState, StreamState,
@@ -20,6 +20,7 @@ pub struct ChatHistory {
     message_subscriptions: Vec<Subscription>,
     expanded_turns: HashSet<EntityId>,
     list_state: ListState,
+    rows: Rc<Vec<HistoryRow>>,
     row_keys: Vec<HistoryRowKey>,
 }
 
@@ -28,6 +29,7 @@ impl ChatHistory {
         let active_chat = active_chat_entity(&state, cx);
         let chat_subscription = active_chat.as_ref().map(|chat| {
             cx.observe(chat, |history, _, cx| {
+                history.rebuild_rows(cx);
                 history.list_state.remeasure();
                 cx.notify()
             })
@@ -47,7 +49,7 @@ impl ChatHistory {
         let list_state = ListState::new(0, ListAlignment::Top, px(120.));
         list_state.set_follow_mode(FollowMode::Tail);
 
-        Self {
+        let mut history = Self {
             state,
             active_chat,
             _state_subscription: state_subscription,
@@ -55,8 +57,11 @@ impl ChatHistory {
             message_subscriptions,
             expanded_turns: HashSet::new(),
             list_state,
+            rows: Rc::new(Vec::new()),
             row_keys: Vec::new(),
-        }
+        };
+        history.rebuild_rows(cx);
+        history
     }
 
     fn update_active_chat_subscription(&mut self, cx: &mut Context<Self>) {
@@ -66,6 +71,7 @@ impl ChatHistory {
         }
         self.chat_subscription = active_chat.as_ref().map(|chat| {
             cx.observe(chat, |history, _, cx| {
+                history.rebuild_rows(cx);
                 history.list_state.remeasure();
                 cx.notify()
             })
@@ -79,8 +85,10 @@ impl ChatHistory {
             .unwrap_or_default();
         self.list_state.reset(0);
         self.list_state.set_follow_mode(FollowMode::Tail);
+        self.rows = Rc::new(Vec::new());
         self.row_keys.clear();
         self.active_chat = active_chat;
+        self.rebuild_rows(cx);
     }
 }
 
@@ -116,12 +124,10 @@ impl ChatHistory {
     ) -> AnyElement {
         let messages = chat.read(cx).messages.clone();
         self.sync_message_subscriptions(&messages, cx);
-        let rows = self.rows_from_messages(&chat, &messages, cx);
-        self.sync_list_rows(&rows, cx);
 
         let history = cx.entity().clone();
         let chat_for_render = chat.clone();
-        let rows_for_render = rows.clone();
+        let rows_for_render = self.rows.clone();
         list(
             self.list_state.clone(),
             move |index, window, cx| match rows_for_render.get(index).cloned() {
@@ -240,12 +246,27 @@ impl ChatHistory {
 
     fn rebuild_rows(&mut self, cx: &mut Context<ChatHistory>) {
         let Some(chat) = &self.active_chat else {
+            self.rows = Rc::new(Vec::new());
             self.sync_list_rows(&[], cx);
             return;
         };
         let messages = chat.read(cx).messages.clone();
         let rows = self.rows_from_messages(chat, &messages, cx);
         self.sync_list_rows(&rows, cx);
+        self.rows = Rc::new(rows);
+    }
+
+    fn remeasure_message_row(&mut self, key: &HistoryKey) {
+        let row_key = HistoryRowKey::Message(key.clone());
+        if let Some(index) = self
+            .row_keys
+            .iter()
+            .position(|candidate| candidate == &row_key)
+        {
+            self.list_state.remeasure_items(index..index + 1);
+        } else {
+            self.list_state.remeasure();
+        }
     }
 }
 
@@ -268,7 +289,7 @@ impl HistoryRow {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 enum HistoryRowKey {
     Message(HistoryKey),
     Summary(EntityId),
@@ -296,8 +317,9 @@ fn subscribe_to_messages(
     messages
         .iter()
         .map(|message| {
-            cx.observe(message, |history, _, cx| {
-                history.list_state.remeasure();
+            let key = message.read(cx).key.clone();
+            cx.observe(message, move |history, _, cx| {
+                history.remeasure_message_row(&key);
                 cx.notify();
             })
         })

@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash as _, Hasher as _},
     time::Instant,
 };
@@ -251,6 +251,7 @@ pub struct ChatState {
     pub subtitle: SharedString,
     pub thread: Option<Thread>,
     pub messages: Vec<Entity<MessageState>>,
+    item_locations: HashMap<String, ThreadItemLocation>,
 }
 
 impl ChatState {
@@ -266,6 +267,7 @@ impl ChatState {
             subtitle,
             thread: None,
             messages,
+            item_locations: HashMap::new(),
         }
     }
 
@@ -276,12 +278,14 @@ impl ChatState {
         messages: Vec<Entity<MessageState>>,
     ) -> Self {
         let id = thread.id.clone();
+        let item_locations = thread_item_locations(&thread);
         Self {
             id,
             title,
             subtitle,
             thread: Some(thread),
             messages,
+            item_locations,
         }
     }
 
@@ -315,6 +319,7 @@ impl ChatState {
         } else {
             thread.turns.push(turn);
         }
+        self.rebuild_item_locations();
     }
 
     pub fn append_thread_item(&mut self, turn_id: Option<&str>, item: ThreadItem) {
@@ -322,6 +327,7 @@ impl ChatState {
             return;
         };
         let item_id = item.id().to_string();
+        let mut changed = false;
         if let Some(turn_id) = turn_id
             && let Some(turn) = thread.turns.iter_mut().find(|turn| turn.id == turn_id)
         {
@@ -331,22 +337,26 @@ impl ChatState {
                 .find(|existing| existing.id() == item_id)
             {
                 *existing = item;
-                return;
+                changed = true;
+            } else {
+                turn.items.push(item);
+                changed = true;
             }
-            turn.items.push(item);
-            return;
-        }
-
-        if let Some(turn) = thread.turns.last_mut() {
+        } else if let Some(turn) = thread.turns.last_mut() {
             if let Some(existing) = turn
                 .items
                 .iter_mut()
                 .find(|existing| existing.id() == item_id)
             {
                 *existing = item;
-                return;
+                changed = true;
+            } else {
+                turn.items.push(item);
+                changed = true;
             }
-            turn.items.push(item);
+        }
+        if changed {
+            self.rebuild_item_locations();
         }
     }
 
@@ -362,6 +372,7 @@ impl ChatState {
                 .find(|existing| existing.id() == item_id)
             {
                 *existing = item;
+                self.rebuild_item_locations();
                 return;
             }
         }
@@ -477,32 +488,60 @@ impl ChatState {
     }
 
     fn thread_item(&self, item_id: &str) -> Option<&ThreadItem> {
+        let location = self.item_locations.get(item_id)?;
         self.thread
             .as_ref()?
             .turns
-            .iter()
-            .flat_map(|turn| turn.items.iter())
-            .find(|item| item.id() == item_id)
+            .get(location.turn_index)?
+            .items
+            .get(location.item_index)
     }
 
     fn thread_item_position(&self, item_id: &str) -> Option<(usize, usize)> {
-        let thread = self.thread.as_ref()?;
-        for (turn_index, turn) in thread.turns.iter().enumerate() {
-            if let Some(item_index) = turn.items.iter().position(|item| item.id() == item_id) {
-                return Some((turn_index, item_index));
-            }
-        }
-        None
+        self.item_locations
+            .get(item_id)
+            .map(|location| (location.turn_index, location.item_index))
     }
 
     fn thread_item_mut(&mut self, item_id: &str) -> Option<&mut ThreadItem> {
+        let location = *self.item_locations.get(item_id)?;
         self.thread
             .as_mut()?
             .turns
-            .iter_mut()
-            .flat_map(|turn| turn.items.iter_mut())
-            .find(|item| item.id() == item_id)
+            .get_mut(location.turn_index)?
+            .items
+            .get_mut(location.item_index)
     }
+
+    fn rebuild_item_locations(&mut self) {
+        self.item_locations = self
+            .thread
+            .as_ref()
+            .map(thread_item_locations)
+            .unwrap_or_default();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ThreadItemLocation {
+    turn_index: usize,
+    item_index: usize,
+}
+
+fn thread_item_locations(thread: &Thread) -> HashMap<String, ThreadItemLocation> {
+    let mut locations = HashMap::new();
+    for (turn_index, turn) in thread.turns.iter().enumerate() {
+        for (item_index, item) in turn.items.iter().enumerate() {
+            locations.insert(
+                item.id().to_string(),
+                ThreadItemLocation {
+                    turn_index,
+                    item_index,
+                },
+            );
+        }
+    }
+    locations
 }
 
 pub struct MessageState {
