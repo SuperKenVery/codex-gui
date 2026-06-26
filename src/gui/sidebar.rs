@@ -5,7 +5,7 @@ use gpui::{
     WeakEntity, Window, WindowControlArea, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -83,7 +83,6 @@ impl Render for Sidebar {
                         Button::new(format!("project-{project_index}"))
                             .ghost()
                             .tooltip(path)
-                            .selected(project_selected)
                             .with_size(px(0.))
                             .w_full()
                             .rounded_lg()
@@ -94,8 +93,12 @@ impl Render for Sidebar {
                                     .gap_2()
                                     .w_full()
                                     .min_w_0()
+                                    .rounded_lg()
                                     .py_1p5()
                                     .px_2()
+                                    .when(project_selected, |this| {
+                                        this.bg(cx.theme().sidebar_accent.opacity(0.38))
+                                    })
                                     .child(
                                         Icon::new(if project_selected {
                                             IconName::FolderOpen

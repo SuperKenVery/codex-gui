@@ -219,7 +219,7 @@ impl ChatPanel {
             .rounded_3xl()
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().input_background())
             .shadow_sm()
             .p_2()
             .flex()
@@ -228,7 +228,7 @@ impl ChatPanel {
             .child(
                 Input::new(&self.composer_input)
                     .appearance(false)
-                    .h(px(92.))
+                    .h(px(60.))
                     .w_full(),
             )
             .child(
@@ -247,6 +247,7 @@ impl ChatPanel {
                                 Button::new("composer-model")
                                     .small()
                                     .ghost()
+                                    .text_color(cx.theme().muted_foreground)
                                     .icon(IconName::Cpu)
                                     .label(model_label)
                                     .tooltip("Model settings")
@@ -290,6 +291,7 @@ impl ChatPanel {
                                 Button::new("composer-permissions")
                                     .small()
                                     .ghost()
+                                    .text_color(cx.theme().muted_foreground)
                                     .icon(IconName::Check)
                                     .label(settings.approvals_reviewer.label())
                                     .tooltip("Permission settings")
@@ -353,6 +355,7 @@ impl ChatPanel {
                                 Button::new("composer-effort")
                                     .small()
                                     .ghost()
+                                    .text_color(cx.theme().muted_foreground)
                                     .icon(IconName::LoaderCircle)
                                     .label(format!("Effort {}", title_case(&settings.effort)))
                                     .tooltip("Thinking effort settings")
@@ -464,7 +467,7 @@ impl ChatPanel {
                     .w_full()
                     .text_center()
                     .text_3xl()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui::FontWeight::LIGHT)
                     .child(format!("What should we build in {active_project_name}?")),
             )
             .child(

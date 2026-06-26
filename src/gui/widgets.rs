@@ -7,15 +7,14 @@ use codex_app_server_protocol::{
 };
 use codex_protocol::models::MessagePhase;
 use gpui::{
-    App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
-    prelude::*, px, rems,
+    AbsoluteLength, App, ClickEvent, CornersRefinement, DefiniteLength, EdgesRefinement, Entity,
+    IntoElement, ParentElement, SharedString, StyleRefinement, Styled, Window, div, prelude::*, px,
+    rems,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _,
+    Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    clipboard::Clipboard,
     h_flex,
-    text::{TextView, TextViewState, markdown},
     theme::Theme,
     v_flex,
 };
@@ -24,19 +23,15 @@ use zed_markdown::{
     MarkdownStyle as ZedMarkdownStyle,
 };
 
-const LARGE_MARKDOWN_BODY_BYTES: usize = 12 * 1024;
-const LARGE_MARKDOWN_VIEW_HEIGHT: f32 = 520.;
-
 pub(super) fn chat_tree_item(
     id: impl Into<gpui::ElementId>,
     title: SharedString,
     _subtitle: SharedString,
     selected: bool,
-    _theme: &Theme,
+    theme: &Theme,
 ) -> Button {
     Button::new(id)
         .ghost()
-        .selected(selected)
         .with_size(px(0.))
         .w_full()
         .rounded_lg()
@@ -46,9 +41,11 @@ pub(super) fn chat_tree_item(
                 .min_w_0()
                 .gap_0p5()
                 .items_start()
+                .rounded_lg()
                 .py_1p5()
                 .pl_7()
                 .pr_2()
+                .when(selected, |this| this.bg(theme.sidebar_accent.opacity(0.38)))
                 .child(
                     div()
                         .w_full()
@@ -74,7 +71,16 @@ pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
 }
 
 pub(super) fn render_notice(body: &str, theme: &Theme) -> impl IntoElement {
-    notice_message_block(body, None, theme, None)
+    message_shell(
+        "",
+        Some(
+            div()
+                .text_sm()
+                .text_color(theme.foreground)
+                .child(body.to_string()),
+        ),
+        theme,
+    )
 }
 
 pub(super) fn render_thread_item_state(
@@ -97,7 +103,6 @@ pub(super) fn render_thread_item_state(
             message_phase(phase.as_ref()),
             state.stream_state,
             tools,
-            state.body_view.as_ref(),
             collapse_tools,
             hide_tools,
             active_tool_tail,
@@ -110,7 +115,6 @@ pub(super) fn render_thread_item_state(
             AssistantPhase::Commentary,
             state.stream_state,
             tools,
-            state.body_view.as_ref(),
             collapse_tools,
             hide_tools,
             active_tool_tail,
@@ -120,7 +124,6 @@ pub(super) fn render_thread_item_state(
         ),
         None => notice_message_block(
             &state.rendered_body,
-            state.body_view.as_ref(),
             theme,
             Some((state.zed_markdown.as_ref(), window)),
         ),
@@ -160,7 +163,6 @@ fn render_assistant_message(
     phase: AssistantPhase,
     stream_state: StreamState,
     tools: &[&ThreadItem],
-    body_view: Option<&Entity<TextViewState>>,
     collapse_tools: bool,
     hide_tools: bool,
     active_tool_tail: bool,
@@ -178,7 +180,6 @@ fn render_assistant_message(
             (AssistantPhase::FinalAnswer, StreamState::Streaming) => "Codex is working",
         },
         body,
-        body_view,
         theme,
         zed_markdown,
     );
@@ -214,11 +215,10 @@ fn render_assistant_message(
 
 fn notice_message_block(
     body: &str,
-    body_view: Option<&Entity<TextViewState>>,
     theme: &Theme,
     zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
-    message_block("", body, body_view, theme, zed_markdown)
+    message_block("", body, theme, zed_markdown)
 }
 
 fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
@@ -249,11 +249,9 @@ fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
 fn message_block(
     author: &'static str,
     body: &str,
-    body_view: Option<&Entity<TextViewState>>,
     theme: &Theme,
     zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
-    let is_large_body = body.len() >= LARGE_MARKDOWN_BODY_BYTES;
     let body = if body.is_empty() {
         None
     } else if let Some((Some(markdown), window)) = zed_markdown {
@@ -261,23 +259,13 @@ fn message_block(
             .into_any_element()
             .into()
     } else {
-        Some(
-            body_view
-                .map(TextView::new)
-                .unwrap_or_else(|| markdown(body.to_string()))
-                .selectable(true)
-                .code_block_actions(|code_block, _, _| {
-                    h_flex()
-                        .gap_1()
-                        .child(Clipboard::new("copy-code").value(code_block.code().clone()))
-                })
-                .when(is_large_body, |view| {
-                    view.h(px(LARGE_MARKDOWN_VIEW_HEIGHT)).scrollable(true)
-                })
-                .into_any_element(),
-        )
+        None
     };
 
+    message_shell(author, body, theme)
+}
+
+fn message_shell(author: &'static str, body: Option<impl IntoElement>, theme: &Theme) -> gpui::Div {
     div()
         .w_full()
         .min_w_0()
@@ -311,6 +299,22 @@ fn zed_markdown_style(window: &Window, theme: &Theme) -> ZedMarkdownStyle {
     });
     style.base_text_style = text_style;
     style.code_block_overflow_x_scroll = true;
+    style.code_block = StyleRefinement {
+        padding: EdgesRefinement {
+            top: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
+            left: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
+            right: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
+            bottom: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
+        },
+        corner_radii: CornersRefinement {
+            top_left: Some(AbsoluteLength::Pixels(theme.radius)),
+            top_right: Some(AbsoluteLength::Pixels(theme.radius)),
+            bottom_left: Some(AbsoluteLength::Pixels(theme.radius)),
+            bottom_right: Some(AbsoluteLength::Pixels(theme.radius)),
+        },
+        background: Some(theme.muted.into()),
+        ..Default::default()
+    };
     style
 }
 

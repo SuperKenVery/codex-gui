@@ -120,14 +120,18 @@ impl CodexGui {
     pub(super) fn apply_thread_started(&mut self, thread: Thread, cx: &mut Context<Self>) {
         let thread_id = thread.id.clone();
         let chat = chat_entity_from_thread(thread, cx);
+        let mut selected_chat_index = 0;
         if let Some(project) = self.active_project_entity(cx) {
-            project.update(cx, |project, cx| {
-                project.upsert_chat(chat, &thread_id, cx);
+            selected_chat_index = project.update(cx, |project, cx| {
+                let selected_chat_index = project
+                    .chat_index_by_id(&thread_id, cx)
+                    .unwrap_or_else(|| project.upsert_chat(chat, &thread_id, cx));
                 cx.notify();
+                selected_chat_index
             });
         }
         self.state.update(cx, |state, cx| {
-            state.select_first_chat();
+            state.select_chat(selected_chat_index);
             cx.notify();
         });
         self.ui_state.update(cx, |state, cx| {
@@ -325,7 +329,7 @@ impl CodexGui {
                 message.stream_state = stream_state;
                 if let Some(body) = body {
                     message.rendered_body = body;
-                    message.sync_body_view(cx);
+                    message.sync_markdown(cx);
                 }
                 message.touch();
                 cx.notify();
@@ -486,7 +490,7 @@ impl CodexGui {
         };
         message.update(cx, |message, cx| {
             message.mark_streaming();
-            message.append_body_view_delta(delta, cx);
+            message.append_markdown_delta(delta, cx);
             cx.notify();
         });
     }

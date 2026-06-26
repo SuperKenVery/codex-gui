@@ -6,7 +6,6 @@ use std::{
 
 use codex_app_server_protocol::{FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn};
 use gpui::{AppContext, Context, Entity, SharedString};
-use gpui_component::text::TextViewState;
 use zed_markdown::Markdown as ZedMarkdown;
 
 pub struct GuiState {
@@ -552,7 +551,6 @@ pub struct MessageState {
     pub created_at: Instant,
     pub updated_at: Instant,
     pub tools_expanded: bool,
-    pub body_view: Option<Entity<TextViewState>>,
     pub zed_markdown: Option<Entity<ZedMarkdown>>,
     pub collapse_tools: bool,
     pub hide_tools: bool,
@@ -589,8 +587,6 @@ impl MessageState {
     ) -> Self {
         let now = Instant::now();
         let rendered_body = body.unwrap_or_default();
-        let body_view = (!rendered_body.is_empty())
-            .then(|| cx.new(|cx| TextViewState::markdown(&rendered_body, cx)));
         let zed_markdown = (!rendered_body.is_empty())
             .then(|| cx.new(|cx| ZedMarkdown::new(rendered_body.clone().into(), None, None, cx)));
         Self {
@@ -601,7 +597,6 @@ impl MessageState {
             created_at: now,
             updated_at: now,
             tools_expanded: false,
-            body_view,
             zed_markdown,
             collapse_tools: true,
             hide_tools: false,
@@ -626,21 +621,13 @@ impl MessageState {
     pub fn mark_complete(&mut self, cx: &mut Context<Self>) {
         self.stream_state = StreamState::Complete;
         self.touch();
-        self.sync_body_view(cx);
+        self.sync_markdown(cx);
     }
 
-    pub fn sync_body_view(&mut self, cx: &mut Context<Self>) {
+    pub fn sync_markdown(&mut self, cx: &mut Context<Self>) {
         if self.rendered_body.is_empty() {
-            self.body_view = None;
             self.zed_markdown = None;
             return;
-        }
-        if let Some(body_view) = &self.body_view {
-            body_view.update(cx, |body_view, cx| {
-                body_view.set_text(&self.rendered_body, cx)
-            });
-        } else {
-            self.body_view = Some(cx.new(|cx| TextViewState::markdown(&self.rendered_body, cx)));
         }
         if let Some(zed_markdown) = &self.zed_markdown {
             zed_markdown.update(cx, |markdown, cx| {
@@ -653,17 +640,12 @@ impl MessageState {
         }
     }
 
-    pub fn append_body_view_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
+    pub fn append_markdown_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
         if delta.is_empty() {
             return;
         }
 
         self.rendered_body.push_str(delta);
-        if let Some(body_view) = &self.body_view {
-            body_view.update(cx, |body_view, cx| body_view.push_str(delta, cx));
-        } else {
-            self.body_view = Some(cx.new(|cx| TextViewState::markdown(&self.rendered_body, cx)));
-        }
         if let Some(zed_markdown) = &self.zed_markdown {
             zed_markdown.update(cx, |markdown, cx| markdown.append(delta, cx));
         } else {
