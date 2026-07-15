@@ -45,6 +45,7 @@ impl CodexGui {
             }
         };
 
+        let latest_thread_updated_at = threads.iter().map(|thread| thread.updated_at).max();
         let chats = if threads.is_empty() {
             vec![empty_chat_entity(cx)]
         } else {
@@ -61,13 +62,19 @@ impl CodexGui {
         let project_index = self
             .state
             .update(cx, |state, cx| state.project_index_by_path(&cwd, cx));
+        let mut project_was_active = false;
         if let Some(project_index) = project_index {
+            project_was_active = project_index == self.state.read(cx).active_project;
             let project = self.state.read(cx).projects[project_index].clone();
             project.update(cx, |project, cx| {
-                project.replace_loaded_chats(chats);
+                project.replace_loaded_chats(chats, latest_thread_updated_at);
                 cx.notify();
             });
-            if project_index == self.state.read(cx).active_project {
+            self.state.update(cx, |state, cx| {
+                state.sort_projects_by_recent_activity(cx);
+                cx.notify();
+            });
+            if project_was_active {
                 self.state.update(cx, |state, cx| {
                     state.select_first_chat();
                     cx.notify();
@@ -76,8 +83,7 @@ impl CodexGui {
         }
 
         self.set_bridge_status("connected to codex app-server", cx);
-        let can_resume_default = !self.ui_state.read(cx).new_chat_open
-            && project_index == Some(self.state.read(cx).active_project);
+        let can_resume_default = !self.ui_state.read(cx).new_chat_open && project_was_active;
         if can_resume_default && let Some(thread_id) = default_thread_id {
             self.request_resume_thread(thread_id, cx);
             self.set_bridge_status("loading thread", cx);

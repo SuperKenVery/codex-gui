@@ -9,11 +9,14 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
+use std::collections::HashSet;
 
 pub struct Sidebar {
     parent: WeakEntity<CodexGui>,
     state: Entity<GuiState>,
     should_move_window: bool,
+    collapsed_projects: HashSet<String>,
+    expanded_thread_projects: HashSet<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -28,15 +31,40 @@ impl Sidebar {
             parent,
             state,
             should_move_window: false,
+            collapsed_projects: HashSet::new(),
+            expanded_thread_projects: HashSet::new(),
             _subscriptions: subscriptions,
         }
     }
 
-    fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn toggle_project(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((path, is_active)) = self.state.read(cx).projects.get(index).map(|project| {
+            (
+                project.read(cx).path.to_string(),
+                index == self.state.read(cx).active_project,
+            )
+        }) else {
+            return;
+        };
+
+        if is_active {
+            if !self.collapsed_projects.insert(path.clone()) {
+                self.collapsed_projects.remove(&path);
+            }
+            cx.notify();
+            return;
+        }
+
+        self.collapsed_projects.remove(&path);
         let parent = self.parent.clone();
         cx.defer(move |cx| {
             let _ = parent.update(cx, |parent, cx| parent.select_project(index, cx));
         });
+    }
+
+    fn show_all_threads(&mut self, path: String, cx: &mut Context<Self>) {
+        self.expanded_thread_projects.insert(path);
+        cx.notify();
     }
 
     fn select_chat(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -79,10 +107,12 @@ impl Render for Sidebar {
                         )
                     };
                     let project_selected = project_index == active_project;
+                    let project_expanded =
+                        project_selected && !self.collapsed_projects.contains(path.as_ref());
                     let tree = tree.child(
                         Button::new(format!("project-{project_index}"))
                             .ghost()
-                            .tooltip(path)
+                            .tooltip(path.clone())
                             .with_size(px(0.))
                             .w_full()
                             .rounded_lg()
@@ -100,7 +130,7 @@ impl Render for Sidebar {
                                         this.bg(cx.theme().sidebar_accent.opacity(0.38))
                                     })
                                     .child(
-                                        Icon::new(if project_selected {
+                                        Icon::new(if project_expanded {
                                             IconName::FolderOpen
                                         } else {
                                             IconName::Folder
@@ -119,29 +149,65 @@ impl Render for Sidebar {
                                     ),
                             )
                             .on_click(cx.listener(move |view, _, _, cx| {
-                                view.select_project(project_index, cx)
+                                view.toggle_project(project_index, cx)
                             })),
                     );
 
-                    if project_selected {
-                        tree.child(v_flex().gap_1().children(chats.iter().enumerate().map(
-                            |(chat_index, chat)| {
-                                let (title, subtitle) = {
-                                    let chat = chat.read(cx);
-                                    (chat.title.clone(), chat.subtitle.clone())
-                                };
-                                chat_tree_item(
-                                    format!("chat-{project_index}-{chat_index}"),
-                                    title,
-                                    subtitle,
-                                    chat_index == active_chat,
-                                    cx.theme(),
+                    if project_expanded {
+                        let show_all_threads =
+                            self.expanded_thread_projects.contains(path.as_ref());
+                        let visible_thread_count = if show_all_threads {
+                            chats.len()
+                        } else {
+                            chats.len().min(5)
+                        };
+                        let has_more_threads = chats.len() > visible_thread_count;
+                        let more_path = path.to_string();
+                        let chat_tree = v_flex()
+                            .gap_1()
+                            .children(chats.iter().take(visible_thread_count).enumerate().map(
+                                |(chat_index, chat)| {
+                                    let (title, subtitle) = {
+                                        let chat = chat.read(cx);
+                                        (chat.title.clone(), chat.subtitle.clone())
+                                    };
+                                    chat_tree_item(
+                                        format!("chat-{project_index}-{chat_index}"),
+                                        title,
+                                        subtitle,
+                                        chat_index == active_chat,
+                                        cx.theme(),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |view, _, _, cx| view.select_chat(chat_index, cx),
+                                    ))
+                                },
+                            ))
+                            .when(has_more_threads, |this| {
+                                this.child(
+                                    Button::new(format!("show-more-threads-{project_index}"))
+                                        .ghost()
+                                        .w_full()
+                                        .with_size(px(0.))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .w_full()
+                                                .py_1()
+                                                .pl_7()
+                                                .pr_2()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("显示更多"),
+                                        )
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.show_all_threads(more_path.clone(), cx)
+                                        })),
                                 )
-                                .on_click(cx.listener(
-                                    move |view, _, _, cx| view.select_chat(chat_index, cx),
-                                ))
-                            },
-                        )))
+                            });
+                        tree.child(chat_tree)
                     } else {
                         tree
                     }

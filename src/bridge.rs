@@ -6,9 +6,9 @@ use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, ClientInfo, InitializeCapabilities, InitializeParams,
     InitializeResponse, JSONRPCError, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
     ModelListParams, ModelListResponse, PermissionProfileListParams, PermissionProfileListResponse,
-    RequestId, ServerNotification, Thread, ThreadForkParams, ThreadForkResponse,
+    RequestId, ServerNotification, SortDirection, Thread, ThreadForkParams, ThreadForkResponse,
     ThreadListCwdFilter, ThreadListParams, ThreadListResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSource, ThreadStartParams, ThreadStartResponse,
+    ThreadResumeResponse, ThreadSortKey, ThreadSource, ThreadStartParams, ThreadStartResponse,
     TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
     UserInput,
 };
@@ -94,24 +94,37 @@ impl AppServerBridge {
     }
 
     pub async fn list_threads(&self, cwd: String) -> BridgeResult<Vec<Thread>> {
-        let response: ThreadListResponse = self
-            .request(
-                "thread/list",
-                ThreadListParams {
-                    cursor: None,
-                    limit: Some(30),
-                    sort_key: None,
-                    sort_direction: None,
-                    model_providers: None,
-                    source_kinds: None,
-                    archived: Some(false),
-                    cwd: Some(ThreadListCwdFilter::One(cwd)),
-                    use_state_db_only: false,
-                    search_term: None,
-                },
-            )
-            .await?;
-        Ok(response.data)
+        let mut threads = Vec::new();
+        let mut cursor = None;
+
+        loop {
+            let response: ThreadListResponse = self
+                .request(
+                    "thread/list",
+                    ThreadListParams {
+                        cursor,
+                        limit: Some(100),
+                        sort_key: Some(ThreadSortKey::UpdatedAt),
+                        sort_direction: Some(SortDirection::Desc),
+                        model_providers: None,
+                        source_kinds: None,
+                        archived: Some(false),
+                        cwd: Some(ThreadListCwdFilter::One(cwd.clone())),
+                        use_state_db_only: false,
+                        search_term: None,
+                    },
+                )
+                .await?;
+
+            threads.extend(response.data);
+            cursor = response.next_cursor;
+
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(threads)
     }
 
     pub async fn list_models(&self) -> BridgeResult<Vec<ModelOption>> {

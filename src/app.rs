@@ -1,4 +1,5 @@
 use crate::bridge::{AppServerBridge, BridgeEvent, start_app_server_bridge};
+use crate::config::codex_config_project_paths;
 use crate::gui::{BridgeState, ChatPanel, GuiState, ProjectState, SideChat, Sidebar, UiState};
 use crate::workspace::workspace_path;
 mod actions;
@@ -12,7 +13,7 @@ use gpui::{
     prelude::*, transparent_black,
 };
 use gpui_component::ActiveTheme as _;
-use std::{sync::mpsc::Receiver, time::Duration};
+use std::{collections::HashSet, sync::mpsc::Receiver, time::Duration};
 
 pub struct CodexGui {
     state: Entity<GuiState>,
@@ -31,9 +32,8 @@ pub struct CodexGui {
 impl CodexGui {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (bridge, bridge_rx) = start_app_server_bridge();
-        let initial_project =
-            cx.new(|_| ProjectState::new("codex-gui".into(), workspace_path().into(), Vec::new()));
-        let state = cx.new(|_| GuiState::new(vec![initial_project]));
+        let initial_projects = initial_projects(cx);
+        let state = cx.new(|_| GuiState::new(initial_projects));
         let ui_state = cx.new(|_| UiState::new());
         let bridge_state = cx.new(|_| BridgeState::new());
         let parent = cx.entity().downgrade();
@@ -97,20 +97,27 @@ impl CodexGui {
         })
         .detach();
 
-        let threads_bridge = bridge.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let cwd = workspace_path();
-                    threads_bridge
-                        .list_threads(cwd.clone())
-                        .await
-                        .map(|threads| (cwd, threads))
-                })
-                .await;
-            let _ = this.update(cx, |view, cx| view.apply_threads_result(result, cx));
-        })
-        .detach();
+        let initial_project_paths = state
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| project.read(cx).path.to_string())
+            .collect::<Vec<_>>();
+        for cwd in initial_project_paths {
+            let threads_bridge = bridge.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn(async move {
+                        threads_bridge
+                            .list_threads(cwd.clone())
+                            .await
+                            .map(|threads| (cwd, threads))
+                    })
+                    .await;
+                let _ = this.update(cx, |view, cx| view.apply_threads_result(result, cx));
+            })
+            .detach();
+        }
 
         Self {
             state,
@@ -126,6 +133,29 @@ impl CodexGui {
             _subscriptions: Vec::new(),
         }
     }
+}
+
+fn initial_projects(cx: &mut Context<CodexGui>) -> Vec<Entity<ProjectState>> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+
+    let workspace_path = workspace_path();
+    seen.insert(workspace_path.clone());
+    paths.push(workspace_path);
+
+    for path in codex_config_project_paths() {
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    }
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = thread_mapping::project_name_from_path(&path);
+            cx.new(|_| ProjectState::new(name.into(), path.into(), Vec::new()))
+        })
+        .collect()
 }
 
 impl Render for CodexGui {

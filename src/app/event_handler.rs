@@ -119,10 +119,12 @@ impl CodexGui {
 
     pub(super) fn apply_thread_started(&mut self, thread: Thread, cx: &mut Context<Self>) {
         let thread_id = thread.id.clone();
+        let updated_at = thread.updated_at;
         let chat = chat_entity_from_thread(thread, cx);
         let mut selected_chat_index = 0;
         if let Some(project) = self.active_project_entity(cx) {
             selected_chat_index = project.update(cx, |project, cx| {
+                project.mark_thread_updated_at(updated_at);
                 let selected_chat_index = project
                     .chat_index_by_id(&thread_id, cx)
                     .unwrap_or_else(|| project.upsert_chat(chat, &thread_id, cx));
@@ -131,6 +133,7 @@ impl CodexGui {
             });
         }
         self.state.update(cx, |state, cx| {
+            state.sort_projects_by_recent_activity(cx);
             state.select_chat(selected_chat_index);
             cx.notify();
         });

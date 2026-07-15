@@ -19,6 +19,7 @@ codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag =
 codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+toml = "0.8.23"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = [
