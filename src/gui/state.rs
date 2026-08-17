@@ -6,7 +6,7 @@ use std::{
 
 use codex_app_server_protocol::{FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn};
 use gpui::{AppContext, Context, Entity, SharedString};
-use zed_markdown::Markdown as ZedMarkdown;
+use gpui_component::text::TextViewState;
 
 pub struct GuiState {
     pub projects: Vec<Entity<ProjectState>>,
@@ -610,7 +610,7 @@ pub struct MessageState {
     pub created_at: Instant,
     pub updated_at: Instant,
     pub tools_expanded: bool,
-    pub zed_markdown: Option<Entity<ZedMarkdown>>,
+    pub markdown: Option<Entity<TextViewState>>,
     pub collapse_tools: bool,
     pub hide_tools: bool,
     pub active_tool_tail: bool,
@@ -646,8 +646,8 @@ impl MessageState {
     ) -> Self {
         let now = Instant::now();
         let rendered_body = body.unwrap_or_default();
-        let zed_markdown = (!rendered_body.is_empty())
-            .then(|| cx.new(|cx| ZedMarkdown::new(rendered_body.clone().into(), None, None, cx)));
+        let markdown = matches!(kind, HistoryEntryKind::Assistant | HistoryEntryKind::Notice)
+            .then(|| cx.new(|cx| TextViewState::markdown(&rendered_body, cx)));
         Self {
             key,
             kind,
@@ -656,7 +656,7 @@ impl MessageState {
             created_at: now,
             updated_at: now,
             tools_expanded: false,
-            zed_markdown,
+            markdown,
             collapse_tools: true,
             hide_tools: false,
             active_tool_tail: false,
@@ -677,25 +677,15 @@ impl MessageState {
         self.touch();
     }
 
-    pub fn mark_complete(&mut self, cx: &mut Context<Self>) {
+    pub fn mark_complete(&mut self) {
         self.stream_state = StreamState::Complete;
         self.touch();
-        self.sync_markdown(cx);
     }
 
-    pub fn sync_markdown(&mut self, cx: &mut Context<Self>) {
-        if self.rendered_body.is_empty() {
-            self.zed_markdown = None;
-            return;
-        }
-        if let Some(zed_markdown) = &self.zed_markdown {
-            zed_markdown.update(cx, |markdown, cx| {
-                markdown.replace(self.rendered_body.clone(), cx)
-            });
-        } else {
-            self.zed_markdown = Some(
-                cx.new(|cx| ZedMarkdown::new(self.rendered_body.clone().into(), None, None, cx)),
-            );
+    pub fn set_body(&mut self, body: String, cx: &mut Context<Self>) {
+        self.rendered_body = body;
+        if let Some(markdown) = &self.markdown {
+            markdown.update(cx, |state, cx| state.set_text(&self.rendered_body, cx));
         }
     }
 
@@ -705,12 +695,8 @@ impl MessageState {
         }
 
         self.rendered_body.push_str(delta);
-        if let Some(zed_markdown) = &self.zed_markdown {
-            zed_markdown.update(cx, |markdown, cx| markdown.append(delta, cx));
-        } else {
-            self.zed_markdown = Some(
-                cx.new(|cx| ZedMarkdown::new(self.rendered_body.clone().into(), None, None, cx)),
-            );
+        if let Some(markdown) = &self.markdown {
+            markdown.update(cx, |state, cx| state.push_str(delta, cx));
         }
     }
 

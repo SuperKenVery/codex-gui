@@ -329,7 +329,7 @@ fn subscribe_to_messages(
 fn render_history_message(
     chat: &Entity<ChatState>,
     message: &Entity<MessageState>,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut gpui::App,
 ) -> AnyElement {
     let message_for_toggle = message.clone();
@@ -345,7 +345,6 @@ fn render_history_message(
         message_state.hide_tools,
         message_state.active_tool_tail,
         cx.theme(),
-        window,
         move |_, _, cx| {
             message_for_toggle.update(cx, |message, cx| {
                 message.toggle_tools();

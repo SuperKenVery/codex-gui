@@ -331,8 +331,7 @@ impl CodexGui {
             existing.update(cx, |message, cx| {
                 message.stream_state = stream_state;
                 if let Some(body) = body {
-                    message.rendered_body = body;
-                    message.sync_markdown(cx);
+                    message.set_body(body, cx);
                 }
                 message.touch();
                 cx.notify();
@@ -534,7 +533,7 @@ impl CodexGui {
                 {
                     return;
                 }
-                message.mark_complete(cx);
+                message.mark_complete();
                 cx.notify();
             });
         }
@@ -553,7 +552,7 @@ impl CodexGui {
     fn mark_item_complete(&self, thread_id: &str, item_id: &str, cx: &mut Context<Self>) {
         if let Some(message) = self.find_assistant_message(thread_id, item_id, cx) {
             message.update(cx, |message, cx| {
-                message.mark_complete(cx);
+                message.mark_complete();
                 cx.notify();
             });
             return;
@@ -566,7 +565,7 @@ impl CodexGui {
                 .unwrap_or(false);
             message.update(cx, |message, cx| {
                 if tools_done {
-                    message.mark_complete(cx);
+                    message.mark_complete();
                 } else {
                     message.touch();
                 }

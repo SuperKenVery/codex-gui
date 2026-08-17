@@ -7,20 +7,16 @@ use codex_app_server_protocol::{
 };
 use codex_protocol::models::MessagePhase;
 use gpui::{
-    AbsoluteLength, App, ClickEvent, CornersRefinement, DefiniteLength, EdgesRefinement, Entity,
-    IntoElement, ParentElement, SharedString, StyleRefinement, Styled, Window, div, prelude::*, px,
-    rems,
+    App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    text::{TextView, TextViewState},
     theme::Theme,
     v_flex,
-};
-use zed_markdown::{
-    Markdown as ZedMarkdown, MarkdownElement as ZedMarkdownElement,
-    MarkdownStyle as ZedMarkdownStyle,
 };
 
 pub(super) fn chat_tree_item(
@@ -91,7 +87,6 @@ pub(super) fn render_thread_item_state(
     hide_tools: bool,
     active_tool_tail: bool,
     theme: &Theme,
-    window: &mut Window,
     on_toggle_tools: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     match item {
@@ -107,8 +102,8 @@ pub(super) fn render_thread_item_state(
             hide_tools,
             active_tool_tail,
             theme,
+            state.markdown.as_ref(),
             Some((state.tools_expanded, Box::new(on_toggle_tools))),
-            Some((state.zed_markdown.as_ref(), window)),
         ),
         Some(item) if is_tool_item(item) => render_assistant_message(
             "",
@@ -119,14 +114,10 @@ pub(super) fn render_thread_item_state(
             hide_tools,
             active_tool_tail,
             theme,
+            state.markdown.as_ref(),
             Some((state.tools_expanded, Box::new(on_toggle_tools))),
-            Some((state.zed_markdown.as_ref(), window)),
         ),
-        None => notice_message_block(
-            &state.rendered_body,
-            theme,
-            Some((state.zed_markdown.as_ref(), window)),
-        ),
+        None => notice_message_block(&state.rendered_body, theme, state.markdown.as_ref()),
         Some(_) => div(),
     }
 }
@@ -167,11 +158,11 @@ fn render_assistant_message(
     hide_tools: bool,
     active_tool_tail: bool,
     theme: &Theme,
+    markdown: Option<&Entity<TextViewState>>,
     tool_toggle: Option<(
         bool,
         Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
     )>,
-    zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
 ) -> gpui::Div {
     let mut block = message_block(
         match (phase, stream_state) {
@@ -181,7 +172,7 @@ fn render_assistant_message(
         },
         body,
         theme,
-        zed_markdown,
+        markdown,
     );
 
     if !hide_tools && !tools.is_empty() {
@@ -216,9 +207,9 @@ fn render_assistant_message(
 fn notice_message_block(
     body: &str,
     theme: &Theme,
-    zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
+    markdown: Option<&Entity<TextViewState>>,
 ) -> gpui::Div {
-    message_block("", body, theme, zed_markdown)
+    message_block("", body, theme, markdown)
 }
 
 fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
@@ -250,16 +241,21 @@ fn message_block(
     author: &'static str,
     body: &str,
     theme: &Theme,
-    zed_markdown: Option<(Option<&Entity<ZedMarkdown>>, &mut Window)>,
+    markdown: Option<&Entity<TextViewState>>,
 ) -> gpui::Div {
     let body = if body.is_empty() {
         None
-    } else if let Some((Some(markdown), window)) = zed_markdown {
-        ZedMarkdownElement::new(markdown.clone(), zed_markdown_style(window, theme))
-            .into_any_element()
-            .into()
     } else {
-        None
+        markdown.map(|markdown| {
+            TextView::new(markdown)
+                .selectable(true)
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .line_height(px(22.))
+                .text_color(theme.foreground)
+                .into_any_element()
+        })
     };
 
     message_shell(author, body, theme)
@@ -286,36 +282,6 @@ fn message_shell(author: &'static str, body: Option<impl IntoElement>, theme: &T
         .when_some(body, |block, body| {
             block.child(div().w_full().min_w_0().overflow_x_hidden().child(body))
         })
-}
-
-fn zed_markdown_style(window: &Window, theme: &Theme) -> ZedMarkdownStyle {
-    let mut style = ZedMarkdownStyle::default();
-    let mut text_style = window.text_style();
-    text_style.refine(&gpui::TextStyleRefinement {
-        font_size: Some(rems(0.875).into()),
-        line_height: Some(px(22.).into()),
-        color: Some(theme.foreground),
-        ..Default::default()
-    });
-    style.base_text_style = text_style;
-    style.code_block_overflow_x_scroll = true;
-    style.code_block = StyleRefinement {
-        padding: EdgesRefinement {
-            top: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
-            left: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
-            right: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
-            bottom: Some(DefiniteLength::Absolute(AbsoluteLength::Pixels(px(12.)))),
-        },
-        corner_radii: CornersRefinement {
-            top_left: Some(AbsoluteLength::Pixels(theme.radius)),
-            top_right: Some(AbsoluteLength::Pixels(theme.radius)),
-            bottom_left: Some(AbsoluteLength::Pixels(theme.radius)),
-            bottom_right: Some(AbsoluteLength::Pixels(theme.radius)),
-        },
-        background: Some(theme.muted.into()),
-        ..Default::default()
-    };
-    style
 }
 
 fn render_tool_summary(tools: &[&ThreadItem], theme: &Theme, expanded: bool) -> gpui::Div {
