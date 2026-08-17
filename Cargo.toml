@@ -17,10 +17,11 @@ zed_markdown = { package = "markdown", git = "https://github.com/zed-industries/
 zed_settings = { package = "settings", git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 zed_theme = { package = "theme", git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 zed_theme_settings = { package = "theme_settings", git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
-codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
+codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+toml = "0.8.23"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = [
@@ -57,6 +58,7 @@ proc-macro2 = { opt-level = 3 }
 taffy = { opt-level = 3 }
 resvg = { opt-level = 3 }
 wasmtime = { opt-level = 3 }
+gpui = { opt-level = 3 }
 
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 zed_actions = { codegen-units = 1 }

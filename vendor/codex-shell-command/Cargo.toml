@@ -1,13 +1,13 @@
 [package]
 name = "codex-shell-command"
-version = "0.140.0"
+version = "0.144.4"
 edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
 base64 = "0.22.1"
-codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
-codex-utils-absolute-path = { git = "https://github.com/openai/codex.git", tag = "rust-v0.140.0" }
+codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
+codex-utils-absolute-path = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
 libc = "0.2.182"
 once_cell = "1.20.2"
 regex = "1.12.3"

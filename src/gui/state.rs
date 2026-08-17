@@ -6,7 +6,6 @@ use std::{
 
 use codex_app_server_protocol::{FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn};
 use gpui::{AppContext, Context, Entity, SharedString};
-use gpui_component::text::TextViewState;
 use zed_markdown::Markdown as ZedMarkdown;
 
 pub struct GuiState {
@@ -43,6 +42,50 @@ impl GuiState {
     pub fn select_project(&mut self, index: usize) {
         self.active_project = index;
         self.active_chat = 0;
+    }
+
+    pub fn sort_projects_by_recent_activity(&mut self, cx: &mut Context<Self>) {
+        let active_path = self
+            .active_project()
+            .map(|project| project.read(cx).path.to_string());
+        let mut projects = self
+            .projects
+            .iter()
+            .enumerate()
+            .map(|(index, project)| {
+                let project_state = project.read(cx);
+                (
+                    index,
+                    project_state.latest_thread_updated_at,
+                    project_state.path.to_string(),
+                    project.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        projects.sort_by(|(a_index, a_updated_at, ..), (b_index, b_updated_at, ..)| {
+            b_updated_at
+                .cmp(a_updated_at)
+                .then_with(|| a_index.cmp(b_index))
+        });
+
+        self.projects = projects
+            .into_iter()
+            .map(|(_, _, _, project)| project)
+            .collect();
+
+        if let Some(active_path) = active_path
+            && let Some(index) = self
+                .projects
+                .iter()
+                .position(|project| project.read(cx).path.as_ref() == active_path.as_str())
+        {
+            self.active_project = index;
+        } else {
+            self.active_project = self
+                .active_project
+                .min(self.projects.len().saturating_sub(1));
+        }
     }
 
     pub fn select_chat(&mut self, index: usize) {
@@ -202,6 +245,7 @@ pub struct ProjectState {
     pub path: SharedString,
     pub chats: Vec<Entity<ChatState>>,
     pub threads_loaded: bool,
+    pub latest_thread_updated_at: Option<i64>,
 }
 
 impl ProjectState {
@@ -211,12 +255,26 @@ impl ProjectState {
             path,
             chats,
             threads_loaded: false,
+            latest_thread_updated_at: None,
         }
     }
 
-    pub fn replace_loaded_chats(&mut self, chats: Vec<Entity<ChatState>>) {
+    pub fn replace_loaded_chats(
+        &mut self,
+        chats: Vec<Entity<ChatState>>,
+        latest_thread_updated_at: Option<i64>,
+    ) {
         self.chats = chats;
         self.threads_loaded = true;
+        self.latest_thread_updated_at = latest_thread_updated_at;
+    }
+
+    pub fn mark_thread_updated_at(&mut self, updated_at: i64) {
+        self.latest_thread_updated_at = Some(
+            self.latest_thread_updated_at
+                .map(|current| current.max(updated_at))
+                .unwrap_or(updated_at),
+        );
     }
 
     pub fn chat_index_by_id(&self, chat_id: &str, cx: &mut Context<Self>) -> Option<usize> {
@@ -552,7 +610,6 @@ pub struct MessageState {
     pub created_at: Instant,
     pub updated_at: Instant,
     pub tools_expanded: bool,
-    pub body_view: Option<Entity<TextViewState>>,
     pub zed_markdown: Option<Entity<ZedMarkdown>>,
     pub collapse_tools: bool,
     pub hide_tools: bool,
@@ -589,8 +646,6 @@ impl MessageState {
     ) -> Self {
         let now = Instant::now();
         let rendered_body = body.unwrap_or_default();
-        let body_view = (!rendered_body.is_empty())
-            .then(|| cx.new(|cx| TextViewState::markdown(&rendered_body, cx)));
         let zed_markdown = (!rendered_body.is_empty())
             .then(|| cx.new(|cx| ZedMarkdown::new(rendered_body.clone().into(), None, None, cx)));
         Self {
@@ -601,7 +656,6 @@ impl MessageState {
             created_at: now,
             updated_at: now,
             tools_expanded: false,
-            body_view,
             zed_markdown,
             collapse_tools: true,
             hide_tools: false,
@@ -626,21 +680,13 @@ impl MessageState {
     pub fn mark_complete(&mut self, cx: &mut Context<Self>) {
         self.stream_state = StreamState::Complete;
         self.touch();
-        self.sync_body_view(cx);
+        self.sync_markdown(cx);
     }
 
-    pub fn sync_body_view(&mut self, cx: &mut Context<Self>) {
+    pub fn sync_markdown(&mut self, cx: &mut Context<Self>) {
         if self.rendered_body.is_empty() {
-            self.body_view = None;
             self.zed_markdown = None;
             return;
-        }
-        if let Some(body_view) = &self.body_view {
-            body_view.update(cx, |body_view, cx| {
-                body_view.set_text(&self.rendered_body, cx)
-            });
-        } else {
-            self.body_view = Some(cx.new(|cx| TextViewState::markdown(&self.rendered_body, cx)));
         }
         if let Some(zed_markdown) = &self.zed_markdown {
             zed_markdown.update(cx, |markdown, cx| {
@@ -653,17 +699,12 @@ impl MessageState {
         }
     }
 
-    pub fn append_body_view_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
+    pub fn append_markdown_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
         if delta.is_empty() {
             return;
         }
 
         self.rendered_body.push_str(delta);
-        if let Some(body_view) = &self.body_view {
-            body_view.update(cx, |body_view, cx| body_view.push_str(delta, cx));
-        } else {
-            self.body_view = Some(cx.new(|cx| TextViewState::markdown(&self.rendered_body, cx)));
-        }
         if let Some(zed_markdown) = &self.zed_markdown {
             zed_markdown.update(cx, |markdown, cx| markdown.append(delta, cx));
         } else {
