@@ -25,17 +25,36 @@
             extensions = [ "rust-src" ];
           };
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          linuxRuntimeLibs = with pkgs; [
+            libglvnd
+            vulkan-loader
+            wayland
+          ];
           commonArgs = {
             pname = "codex-gui";
             version = "0.1.0";
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
+            nativeBuildInputs = with pkgs; [
+              cmake
+              pkg-config
+            ];
             buildInputs = lib.optionals pkgs.stdenv.isDarwin [
               pkgs.apple-sdk
               pkgs.libiconv
             ] ++ (with pkgs; [
-              cmake
+              openssl
+            ]) ++ lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+              fontconfig
+              freetype
+              libglvnd
+              libx11
+              libxcb
+              libxkbcommon
+              vulkan-loader
+              wayland
             ]);
+            NIX_LDFLAGS = lib.optionalString pkgs.stdenv.isLinux "-rpath ${lib.makeLibraryPath linuxRuntimeLibs}";
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           codex-gui = craneLib.buildPackage (commonArgs // {
@@ -60,8 +79,13 @@
 
           devShells.default = craneLib.devShell {
             checks = self.checks.${system};
+            packages = if pkgs.stdenv.isLinux then (with pkgs; [
+              mangohud
+            ]) else [];
             env = {
-              RUST_BACKTRACE="1";
+              RUST_BACKTRACE = "1";
+            } // lib.optionalAttrs pkgs.stdenv.isLinux {
+              LD_LIBRARY_PATH = lib.makeLibraryPath linuxRuntimeLibs;
             };
           };
         };
