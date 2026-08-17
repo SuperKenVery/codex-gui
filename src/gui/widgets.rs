@@ -413,9 +413,10 @@ fn render_tool_call(tool: &ThreadItem, theme: &Theme) -> gpui::Div {
 
 fn tool_call_text(tool: &ThreadItem) -> (String, String) {
     match tool {
-        ThreadItem::CommandExecution { command, cwd, .. } => {
-            ("Terminal".into(), format!("{command} ({})", cwd.display()))
-        }
+        ThreadItem::CommandExecution { command, cwd, .. } => (
+            "Terminal".into(),
+            format!("{command} ({})", cwd.render_for_ui()),
+        ),
         ThreadItem::FileChange { changes, .. } => {
             let detail = if changes.is_empty() {
                 "Preparing file edits".into()

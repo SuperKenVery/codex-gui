@@ -112,6 +112,8 @@ impl AppServerBridge {
                         cwd: Some(ThreadListCwdFilter::One(cwd.clone())),
                         use_state_db_only: false,
                         search_term: None,
+                        parent_thread_id: None,
+                        ancestor_thread_id: None,
                     },
                 )
                 .await?;
@@ -256,6 +258,7 @@ impl AppServerBridge {
                 personality: None,
                 output_schema: None,
                 collaboration_mode: None,
+                multi_agent_mode: None,
             },
         )
         .await

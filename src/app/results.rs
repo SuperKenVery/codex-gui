@@ -26,7 +26,8 @@ impl CodexGui {
     ) {
         match result {
             Ok(response) => {
-                self.set_bridge_status(format!("connected: {}", response.user_agent), cx)
+                self.set_bridge_status(format!("connected: {}", response.user_agent), cx);
+                self.request_startup_data(cx);
             }
             Err(err) => self.apply_bridge_error(err.to_string(), cx),
         }

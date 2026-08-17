@@ -1,10 +1,50 @@
 //! Send bridge requests
 
 use super::CodexGui;
-use crate::gui::ChatSettings;
+use crate::{gui::ChatSettings, workspace::workspace_path};
 use gpui::{AppContext, Context};
 
 impl CodexGui {
+    pub(super) fn request_startup_data(&self, cx: &mut Context<Self>) {
+        self.request_models(cx);
+        self.request_permission_profiles(workspace_path(), cx);
+
+        let initial_project_paths = self
+            .state
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| project.read(cx).path.to_string())
+            .collect::<Vec<_>>();
+        for cwd in initial_project_paths {
+            self.request_project_threads(cwd, cx);
+        }
+    }
+
+    pub(super) fn request_models(&self, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.list_models().await })
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_models_result(result, cx));
+        })
+        .detach();
+    }
+
+    pub(super) fn request_permission_profiles(&self, cwd: String, cx: &mut Context<Self>) {
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { bridge.list_permission_profiles(cwd).await })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.apply_permission_profiles_result(result, cx)
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn request_project_threads(&self, cwd: String, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {

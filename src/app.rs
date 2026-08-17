@@ -73,52 +73,6 @@ impl CodexGui {
         })
         .detach();
 
-        let models_bridge = bridge.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { models_bridge.list_models().await })
-                .await;
-            let _ = this.update(cx, |view, cx| view.apply_models_result(result, cx));
-        })
-        .detach();
-
-        let profiles_bridge = bridge.clone();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    profiles_bridge
-                        .list_permission_profiles(workspace_path())
-                        .await
-                })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.apply_permission_profiles_result(result, cx)
-            });
-        })
-        .detach();
-
-        let initial_project_paths = state
-            .read(cx)
-            .projects
-            .iter()
-            .map(|project| project.read(cx).path.to_string())
-            .collect::<Vec<_>>();
-        for cwd in initial_project_paths {
-            let threads_bridge = bridge.clone();
-            cx.spawn(async move |this, cx| {
-                let result = cx
-                    .background_spawn(async move {
-                        threads_bridge
-                            .list_threads(cwd.clone())
-                            .await
-                            .map(|threads| (cwd, threads))
-                    })
-                    .await;
-                let _ = this.update(cx, |view, cx| view.apply_threads_result(result, cx));
-            })
-            .detach();
-        }
-
         Self {
             state,
             ui_state,
