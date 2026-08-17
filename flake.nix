@@ -84,6 +84,10 @@
             ]) else [];
             env = {
               RUST_BACKTRACE = "1";
+              # Keep panic backtraces without making every recoverable anyhow
+              # error capture a stack trace. GPUI creates recoverable errors in
+              # hot rendering paths, where lib backtraces make scrolling jank.
+              RUST_LIB_BACKTRACE = "0";
             } // lib.optionalAttrs pkgs.stdenv.isLinux {
               LD_LIBRARY_PATH = lib.makeLibraryPath linuxRuntimeLibs;
             };

@@ -187,7 +187,7 @@ impl CodexGui {
                     "bridge-error".into(),
                     "Bridge error".into(),
                     message.clone().into(),
-                    vec![cx.new(|cx| MessageState::notice(message, cx))],
+                    vec![cx.new(|_| MessageState::notice(message))],
                 )
             });
             project.update(cx, |project, cx| {
@@ -331,14 +331,14 @@ impl CodexGui {
             existing.update(cx, |message, cx| {
                 message.stream_state = stream_state;
                 if let Some(body) = body {
-                    message.set_body(body, cx);
+                    message.set_body(body);
                 }
                 message.touch();
                 cx.notify();
             });
             return;
         }
-        let message = cx.new(|cx| MessageState::item(key, kind, body, stream_state, cx));
+        let message = cx.new(|_| MessageState::item(key, kind, body, stream_state));
         chat.update(cx, |chat, cx| {
             chat.append_message(message);
             cx.notify();
@@ -492,7 +492,7 @@ impl CodexGui {
         };
         message.update(cx, |message, cx| {
             message.mark_streaming();
-            message.append_markdown_delta(delta, cx);
+            message.append_body_delta(delta);
             cx.notify();
         });
     }

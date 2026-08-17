@@ -8,8 +8,8 @@ mod workspace;
 
 use app::CodexGui;
 use gpui::{
-    App, AppContext, Bounds, Styled, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, point, px, size, transparent_black,
+    App, AppContext, Bounds, Styled, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
+    transparent_black,
 };
 use gpui_component::{Root, Theme};
 use gpui_component_assets::Assets;

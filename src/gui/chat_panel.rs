@@ -9,7 +9,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, IconName, Selectable as _, Side, Sizable as _,
     button::{Button, ButtonVariants as _},
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement,
 };
@@ -20,7 +20,7 @@ pub struct ChatPanel {
     ui_state: Entity<UiState>,
     bridge_state: Entity<BridgeState>,
     history: Entity<ChatHistory>,
-    composer_input: Entity<InputState>,
+    composer_input: Entity<TextareaState>,
     project_path_input: Entity<InputState>,
     should_move_window: bool,
     _subscriptions: Vec<Subscription>,
@@ -37,7 +37,7 @@ impl ChatPanel {
     ) -> Self {
         let history = cx.new(|cx| ChatHistory::new(state.clone(), cx));
         let composer_input = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
                 .auto_grow(1, 5)
                 .submit_on_enter(true)
                 .placeholder("Do anything")
@@ -226,7 +226,7 @@ impl ChatPanel {
             .flex_col()
             .gap_2()
             .child(
-                Input::new(&self.composer_input)
+                Textarea::new(&self.composer_input)
                     .appearance(false)
                     .h(px(60.))
                     .w_full(),

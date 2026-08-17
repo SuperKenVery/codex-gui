@@ -39,10 +39,9 @@ pub(super) fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState>
             "empty".into(),
             "No Codex threads".into(),
             "Click New to start one in this workspace".into(),
-            vec![cx.new(|cx| {
+            vec![cx.new(|_| {
                 MessageState::notice(
                     "No persisted Codex threads were returned for this workspace.".into(),
-                    cx,
                 )
             })],
         )
@@ -67,25 +66,23 @@ pub(super) fn append_thread_item(
         ThreadItem::UserMessage { id, content, .. } => {
             let text = user_input_text(&content);
             if !text.is_empty() {
-                messages.push(cx.new(|cx| {
+                messages.push(cx.new(|_| {
                     MessageState::item(
                         HistoryKey::Item(id),
                         HistoryEntryKind::User,
                         None,
                         StreamState::Complete,
-                        cx,
                     )
                 }));
             }
         }
         ThreadItem::AgentMessage { id, text, .. } => {
-            messages.push(cx.new(|cx| {
+            messages.push(cx.new(|_| {
                 MessageState::item(
                     HistoryKey::Item(id.clone()),
                     HistoryEntryKind::Assistant,
                     Some(text),
                     StreamState::Complete,
-                    cx,
                 )
             }));
         }
@@ -117,13 +114,12 @@ pub(super) fn push_tool_to_messages(
         }
     }
 
-    messages.push(cx.new(|cx| {
+    messages.push(cx.new(|_| {
         MessageState::item(
             HistoryKey::ToolGroup(tool_id),
             HistoryEntryKind::ToolGroup,
             None,
             StreamState::Complete,
-            cx,
         )
     }));
 }

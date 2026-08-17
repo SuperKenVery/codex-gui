@@ -1,16 +1,29 @@
-use std::{collections::HashSet, rc::Rc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use crate::gui::{
     ChatState, GuiState, HistoryKey, MessageState, StreamState,
-    widgets::{render_notice, render_thread_item_state, render_worked_summary},
+    transcript::{
+        TranscriptBlockStore, TranscriptBlockTarget, TranscriptDocument, TranscriptPlugin,
+    },
+    widgets::{
+        render_assistant_header, render_notice, render_tool_group, render_user_message,
+        render_worked_summary, user_input_text,
+    },
 };
 use codex_app_server_protocol::ThreadItem;
 use codex_protocol::models::MessagePhase;
 use gpui::{
-    AnyElement, Context, Entity, EntityId, FollowMode, IntoElement, ListAlignment, ListState,
-    ParentElement, Render, Styled, Subscription, Window, div, list, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement,
+    Render, Styled, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
-use gpui_component::ActiveTheme as _;
+use gpui_component::{
+    ActiveTheme as _,
+    text::{MarkdownExtensions, TextView, TextViewState},
+};
 
 pub struct ChatHistory {
     state: Entity<GuiState>,
@@ -18,49 +31,43 @@ pub struct ChatHistory {
     _state_subscription: Subscription,
     chat_subscription: Option<Subscription>,
     message_subscriptions: Vec<Subscription>,
+    subscribed_message_ids: Vec<EntityId>,
     expanded_turns: HashSet<EntityId>,
-    list_state: ListState,
-    rows: Rc<Vec<HistoryRow>>,
-    row_keys: Vec<HistoryRowKey>,
+    transcript: Entity<TextViewState>,
+    transcript_extensions: MarkdownExtensions,
+    transcript_blocks: TranscriptBlockStore,
+    transcript_source: String,
+    transcript_chat_id: Option<String>,
 }
 
 impl ChatHistory {
     pub fn new(state: Entity<GuiState>, cx: &mut Context<Self>) -> Self {
         let active_chat = active_chat_entity(&state, cx);
-        let chat_subscription = active_chat.as_ref().map(|chat| {
-            cx.observe(chat, |history, _, cx| {
-                history.rebuild_rows(cx);
-                history.list_state.remeasure();
-                cx.notify()
-            })
-        });
+        let chat_subscription = subscribe_to_chat(active_chat.as_ref(), cx);
         let state_subscription = cx.observe(&state, |history, _, cx| {
             history.update_active_chat_subscription(cx);
             cx.notify();
         });
-        let message_subscriptions = active_chat
-            .as_ref()
-            .map(|chat| {
-                let messages = chat.read(cx).messages.clone();
-                subscribe_to_messages(&messages, cx)
-            })
-            .unwrap_or_default();
-
-        let list_state = ListState::new(0, ListAlignment::Top, px(120.));
-        list_state.set_follow_mode(FollowMode::Tail);
+        let transcript = cx.new(|cx| TextViewState::markdown("", cx));
+        let transcript_blocks = Arc::new(RwLock::new(Default::default()));
+        let transcript_extensions =
+            TranscriptPlugin::new(cx.entity().downgrade(), transcript_blocks.clone()).extensions();
 
         let mut history = Self {
             state,
             active_chat,
             _state_subscription: state_subscription,
             chat_subscription,
-            message_subscriptions,
+            message_subscriptions: Vec::new(),
+            subscribed_message_ids: Vec::new(),
             expanded_turns: HashSet::new(),
-            list_state,
-            rows: Rc::new(Vec::new()),
-            row_keys: Vec::new(),
+            transcript,
+            transcript_extensions,
+            transcript_blocks,
+            transcript_source: String::new(),
+            transcript_chat_id: None,
         };
-        history.rebuild_rows(cx);
+        history.rebuild_transcript(cx);
         history
     }
 
@@ -69,104 +76,92 @@ impl ChatHistory {
         if self.active_chat == active_chat {
             return;
         }
-        self.chat_subscription = active_chat.as_ref().map(|chat| {
-            cx.observe(chat, |history, _, cx| {
-                history.rebuild_rows(cx);
-                history.list_state.remeasure();
-                cx.notify()
-            })
-        });
-        self.message_subscriptions = active_chat
-            .as_ref()
-            .map(|chat| {
-                let messages = chat.read(cx).messages.clone();
-                subscribe_to_messages(&messages, cx)
-            })
-            .unwrap_or_default();
-        self.list_state.reset(0);
-        self.list_state.set_follow_mode(FollowMode::Tail);
-        self.rows = Rc::new(Vec::new());
-        self.row_keys.clear();
+
+        self.chat_subscription = subscribe_to_chat(active_chat.as_ref(), cx);
+        self.message_subscriptions.clear();
+        self.subscribed_message_ids.clear();
         self.active_chat = active_chat;
-        self.rebuild_rows(cx);
+        self.transcript = cx.new(|cx| TextViewState::markdown("", cx));
+        self.transcript_source.clear();
+        self.transcript_chat_id = None;
+        self.rebuild_transcript(cx);
     }
-}
 
-impl Render for ChatHistory {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let chat = self.active_chat.clone();
-
-        chat.map(|chat| self.render_message_list(chat, cx))
-            .unwrap_or_else(|| {
-                div()
-                    .id("message-list")
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .min_w_0()
-                    .gap_3()
-                    .overflow_x_hidden()
-                    .overflow_y_scroll()
-                    .child(render_notice(
-                        "Loading Codex threads from the app server.",
-                        cx.theme(),
-                    ))
-                    .into_any_element()
-            })
-    }
-}
-
-impl ChatHistory {
-    fn render_message_list(
+    fn sync_message_subscriptions(
         &mut self,
-        chat: Entity<ChatState>,
-        cx: &mut Context<ChatHistory>,
-    ) -> AnyElement {
+        messages: &[Entity<MessageState>],
+        cx: &mut Context<Self>,
+    ) {
+        let message_ids = messages.iter().map(Entity::entity_id).collect::<Vec<_>>();
+        if message_ids == self.subscribed_message_ids {
+            return;
+        }
+
+        self.message_subscriptions = messages
+            .iter()
+            .map(|message| {
+                cx.observe(message, |history, _, cx| {
+                    history.rebuild_transcript(cx);
+                    cx.notify();
+                })
+            })
+            .collect();
+        self.subscribed_message_ids = message_ids;
+    }
+
+    fn rebuild_transcript(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = self.active_chat.clone() else {
+            self.sync_transcript(None, TranscriptDocument::new(), cx);
+            return;
+        };
         let messages = chat.read(cx).messages.clone();
         self.sync_message_subscriptions(&messages, cx);
+        let rows = self.rows_from_messages(&chat, &messages, cx);
+        let document = self.document_from_rows(&chat, &rows, cx);
+        let chat_id = chat.read(cx).id.clone();
+        self.sync_transcript(Some(chat_id), document, cx);
+    }
 
-        let history = cx.entity().clone();
-        let chat_for_render = chat.clone();
-        let rows_for_render = self.rows.clone();
-        list(
-            self.list_state.clone(),
-            move |index, window, cx| match rows_for_render.get(index).cloned() {
-                Some(HistoryRow::Message(message)) => {
-                    render_history_message(&chat_for_render, &message, window, cx)
-                }
-                Some(HistoryRow::Summary {
-                    turn_id,
-                    duration,
-                    expanded,
-                }) => {
-                    let history = history.clone();
-                    render_worked_summary(duration, cx.theme(), expanded)
-                        .id(format!("worked-summary-{turn_id}"))
-                        .on_click(move |_, _, cx| {
-                            let _ = history.update(cx, |history, cx| {
-                                if !history.expanded_turns.remove(&turn_id) {
-                                    history.expanded_turns.insert(turn_id);
-                                }
-                                history.rebuild_rows(cx);
-                                history.list_state.remeasure();
-                                cx.notify();
-                            });
-                        })
-                        .into_any_element()
-                }
-                None => div().into_any_element(),
-            },
-        )
-        .size_full()
-        .min_w_0()
-        .into_any_element()
+    fn sync_transcript(
+        &mut self,
+        chat_id: Option<String>,
+        document: TranscriptDocument,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(mut blocks) = self.transcript_blocks.write() {
+            *blocks = document.blocks;
+        }
+
+        let same_chat = self.transcript_chat_id == chat_id;
+        let old_source = std::mem::replace(&mut self.transcript_source, document.source);
+        self.transcript_chat_id = chat_id;
+
+        if same_chat && old_source == self.transcript_source {
+            return;
+        }
+
+        let appended = if same_chat && !old_source.is_empty() {
+            self.transcript_source
+                .strip_prefix(&old_source)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let source = self.transcript_source.clone();
+        self.transcript.update(cx, |state, cx| {
+            if let Some(delta) = appended {
+                state.push_str(&delta, cx);
+            } else {
+                state.set_text(&source, cx);
+            }
+        });
     }
 
     fn rows_from_messages(
         &self,
         chat: &Entity<ChatState>,
         messages: &[Entity<MessageState>],
-        cx: &mut Context<ChatHistory>,
+        cx: &mut Context<Self>,
     ) -> Vec<HistoryRow> {
         let mut rows = Vec::new();
         let mut index = 0;
@@ -176,8 +171,7 @@ impl ChatHistory {
                     next_user_index(chat, messages, index + 1, cx).unwrap_or(messages.len());
                 if let Some(fold) = completed_turn_fold(chat, messages, index, next_turn, cx) {
                     let turn_id = messages[index].entity_id();
-                    configure_message(&messages[index], true, false, false, cx);
-                    rows.push(HistoryRow::Message(messages[index].clone()));
+                    rows.push(HistoryRow::message(messages[index].clone()));
                     rows.push(HistoryRow::Summary {
                         turn_id,
                         duration: fold.duration,
@@ -185,13 +179,20 @@ impl ChatHistory {
                     });
 
                     if self.expanded_turns.contains(&turn_id) {
-                        for message in messages.iter().take(next_turn).skip(index + 1) {
-                            configure_message(message, true, false, false, cx);
-                            rows.push(HistoryRow::Message(message.clone()));
-                        }
+                        rows.extend(
+                            messages[index + 1..next_turn]
+                                .iter()
+                                .cloned()
+                                .map(HistoryRow::message),
+                        );
                     } else {
-                        configure_message(&messages[fold.final_index], true, true, false, cx);
-                        rows.push(HistoryRow::Message(messages[fold.final_index].clone()));
+                        rows.push(HistoryRow::Message {
+                            message: messages[fold.final_index].clone(),
+                            options: MessageRenderOptions {
+                                hide_tools: true,
+                                ..Default::default()
+                            },
+                        });
                     }
 
                     index = next_turn;
@@ -199,80 +200,147 @@ impl ChatHistory {
                 }
             }
 
-            let active_tail = is_active_tool_tail(chat, messages, index, cx);
-            configure_message(&messages[index], true, false, active_tail, cx);
-            rows.push(HistoryRow::Message(messages[index].clone()));
+            rows.push(HistoryRow::Message {
+                message: messages[index].clone(),
+                options: MessageRenderOptions {
+                    active_tool_tail: is_active_tool_tail(chat, messages, index, cx),
+                    ..Default::default()
+                },
+            });
             index += 1;
         }
         rows
     }
 
-    fn sync_list_rows(&mut self, rows: &[HistoryRow], cx: &mut Context<ChatHistory>) {
-        let next_keys = rows.iter().map(|row| row.key(cx)).collect::<Vec<_>>();
-        if next_keys == self.row_keys {
-            return;
+    fn document_from_rows(
+        &self,
+        chat: &Entity<ChatState>,
+        rows: &[HistoryRow],
+        cx: &mut Context<Self>,
+    ) -> TranscriptDocument {
+        let mut document = TranscriptDocument::new();
+        for row in rows {
+            match row {
+                HistoryRow::Summary {
+                    turn_id,
+                    duration,
+                    expanded,
+                } => document.push_block(TranscriptBlockTarget::WorkedSummary {
+                    turn_id: *turn_id,
+                    duration: *duration,
+                    expanded: *expanded,
+                }),
+                HistoryRow::Message { message, options } => {
+                    let message = message.read(cx);
+                    let chat = chat.read(cx);
+                    match chat.item_for_state(message) {
+                        Some(ThreadItem::UserMessage { .. }) => {
+                            document.push_block(TranscriptBlockTarget::User {
+                                key: message.key.clone(),
+                            });
+                        }
+                        Some(ThreadItem::AgentMessage { text, phase, .. }) => {
+                            let label = match (phase.as_ref(), message.stream_state) {
+                                (Some(MessagePhase::Commentary), _) => "",
+                                (_, StreamState::Complete) => "Codex",
+                                (_, StreamState::Streaming) => "Codex is working",
+                            };
+                            if !label.is_empty() {
+                                document.push_block(TranscriptBlockTarget::AssistantHeader {
+                                    key: message.key.clone(),
+                                    label,
+                                });
+                            }
+                            document.push_markdown(text);
+                            if !options.hide_tools && !chat.tools_for_state(message).is_empty() {
+                                document.push_block(TranscriptBlockTarget::Tools {
+                                    key: message.key.clone(),
+                                    collapse: options.collapse_tools,
+                                    active_tail: options.active_tool_tail,
+                                });
+                            }
+                        }
+                        Some(item) if is_tool_item(item) => {
+                            if !options.hide_tools && !chat.tools_for_state(message).is_empty() {
+                                document.push_block(TranscriptBlockTarget::Tools {
+                                    key: message.key.clone(),
+                                    collapse: options.collapse_tools,
+                                    active_tail: options.active_tool_tail,
+                                });
+                            }
+                        }
+                        None => document.push_markdown(&message.rendered_body),
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+        document
+    }
+}
+
+impl Render for ChatHistory {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.active_chat.is_none() {
+            return div()
+                .id("message-list")
+                .flex()
+                .flex_col()
+                .size_full()
+                .min_w_0()
+                .gap_3()
+                .overflow_x_hidden()
+                .overflow_y_scroll()
+                .child(render_notice(
+                    "Loading Codex threads from the app server.",
+                    cx.theme(),
+                ))
+                .into_any_element();
         }
 
-        let old_len = self.row_keys.len();
-        let new_len = next_keys.len();
-        let prefix = self
-            .row_keys
-            .iter()
-            .zip(next_keys.iter())
-            .take_while(|(old, new)| old == new)
-            .count();
-        let suffix = self.row_keys[prefix..]
-            .iter()
-            .rev()
-            .zip(next_keys[prefix..].iter().rev())
-            .take_while(|(old, new)| old == new)
-            .count();
-        let old_end = old_len.saturating_sub(suffix);
-        let new_end = new_len.saturating_sub(suffix);
-        self.list_state.splice(prefix..old_end, new_end - prefix);
-        self.row_keys = next_keys;
+        div()
+            .id("message-list")
+            .size_full()
+            .min_w_0()
+            .overflow_hidden()
+            .child(
+                TextView::new(&self.transcript)
+                    .markdown_extensions(self.transcript_extensions.clone())
+                    .selectable(true)
+                    .scrollable(true)
+                    .size_full()
+                    .min_w_0()
+                    .text_sm()
+                    .line_height(px(22.))
+                    .text_color(cx.theme().foreground),
+            )
+            .into_any_element()
     }
+}
 
-    fn sync_message_subscriptions(
-        &mut self,
-        messages: &[Entity<MessageState>],
-        cx: &mut Context<ChatHistory>,
-    ) {
-        if self.message_subscriptions.len() == messages.len() {
-            return;
-        }
-        self.message_subscriptions = subscribe_to_messages(messages, cx);
-    }
+#[derive(Clone, Copy)]
+struct MessageRenderOptions {
+    collapse_tools: bool,
+    hide_tools: bool,
+    active_tool_tail: bool,
+}
 
-    fn rebuild_rows(&mut self, cx: &mut Context<ChatHistory>) {
-        let Some(chat) = &self.active_chat else {
-            self.rows = Rc::new(Vec::new());
-            self.sync_list_rows(&[], cx);
-            return;
-        };
-        let messages = chat.read(cx).messages.clone();
-        let rows = self.rows_from_messages(chat, &messages, cx);
-        self.sync_list_rows(&rows, cx);
-        self.rows = Rc::new(rows);
-    }
-
-    fn remeasure_message_row(&mut self, key: &HistoryKey) {
-        let row_key = HistoryRowKey::Message(key.clone());
-        if let Some(index) = self
-            .row_keys
-            .iter()
-            .position(|candidate| candidate == &row_key)
-        {
-            self.list_state.remeasure_items(index..index + 1);
-        } else {
-            self.list_state.remeasure();
+impl Default for MessageRenderOptions {
+    fn default() -> Self {
+        Self {
+            collapse_tools: true,
+            hide_tools: false,
+            active_tool_tail: false,
         }
     }
 }
 
 #[derive(Clone)]
 enum HistoryRow {
-    Message(Entity<MessageState>),
+    Message {
+        message: Entity<MessageState>,
+        options: MessageRenderOptions,
+    },
     Summary {
         turn_id: EntityId,
         duration: Duration,
@@ -281,78 +349,116 @@ enum HistoryRow {
 }
 
 impl HistoryRow {
-    fn key(&self, cx: &mut Context<ChatHistory>) -> HistoryRowKey {
-        match self {
-            HistoryRow::Message(message) => HistoryRowKey::Message(message.read(cx).key.clone()),
-            HistoryRow::Summary { turn_id, .. } => HistoryRowKey::Summary(*turn_id),
+    fn message(message: Entity<MessageState>) -> Self {
+        Self::Message {
+            message,
+            options: MessageRenderOptions {
+                collapse_tools: true,
+                ..Default::default()
+            },
         }
     }
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-enum HistoryRowKey {
-    Message(HistoryKey),
-    Summary(EntityId),
-}
-
-fn configure_message(
-    message: &Entity<MessageState>,
-    collapse_tools: bool,
-    hide_tools: bool,
-    active_tool_tail: bool,
+fn subscribe_to_chat(
+    chat: Option<&Entity<ChatState>>,
     cx: &mut Context<ChatHistory>,
-) {
-    message.update(cx, |message, cx| {
-        let changed = message.set_render_options(collapse_tools, hide_tools, active_tool_tail);
-        if changed {
+) -> Option<Subscription> {
+    chat.map(|chat| {
+        cx.observe(chat, |history, _, cx| {
+            history.rebuild_transcript(cx);
             cx.notify();
-        }
-    });
-}
-
-fn subscribe_to_messages(
-    messages: &[Entity<MessageState>],
-    cx: &mut Context<ChatHistory>,
-) -> Vec<Subscription> {
-    messages
-        .iter()
-        .map(|message| {
-            let key = message.read(cx).key.clone();
-            cx.observe(message, move |history, _, cx| {
-                history.remeasure_message_row(&key);
-                cx.notify();
-            })
         })
-        .collect()
+    })
 }
 
-fn render_history_message(
-    chat: &Entity<ChatState>,
-    message: &Entity<MessageState>,
+pub(super) fn render_transcript_block(
+    history: &WeakEntity<ChatHistory>,
+    target: TranscriptBlockTarget,
     _window: &mut Window,
-    cx: &mut gpui::App,
+    cx: &mut App,
 ) -> AnyElement {
-    let message_for_toggle = message.clone();
-    let chat = chat.read(cx);
-    let message_state = message.read(cx);
-    let item = chat.item_for_state(&message_state);
-    let tools = chat.tools_for_state(&message_state);
-    render_thread_item_state(
-        item,
-        &tools,
-        &message_state,
-        message_state.collapse_tools,
-        message_state.hide_tools,
-        message_state.active_tool_tail,
-        cx.theme(),
-        move |_, _, cx| {
-            message_for_toggle.update(cx, |message, cx| {
-                message.toggle_tools();
-                cx.notify();
-            });
-        },
-    )
-    .into_any_element()
+    match target {
+        TranscriptBlockTarget::AssistantHeader { label, .. } => {
+            render_assistant_header(label, cx.theme()).into_any_element()
+        }
+        TranscriptBlockTarget::WorkedSummary {
+            turn_id,
+            duration,
+            expanded,
+        } => {
+            let history = history.clone();
+            render_worked_summary(duration, cx.theme(), expanded)
+                .id(format!("worked-summary-{turn_id}"))
+                .on_click(move |_, _, cx| {
+                    let _ = history.update(cx, |history, cx| {
+                        if !history.expanded_turns.remove(&turn_id) {
+                            history.expanded_turns.insert(turn_id);
+                        }
+                        history.rebuild_transcript(cx);
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        }
+        TranscriptBlockTarget::User { key } => {
+            let Some((chat, message)) = transcript_message(history, &key, cx) else {
+                return div().into_any_element();
+            };
+            let text = {
+                let chat = chat.read(cx);
+                let message = message.read(cx);
+                let Some(ThreadItem::UserMessage { content, .. }) = chat.item_for_state(message)
+                else {
+                    return div().into_any_element();
+                };
+                user_input_text(content)
+            };
+            render_user_message(&text, cx.theme()).into_any_element()
+        }
+        TranscriptBlockTarget::Tools {
+            key,
+            collapse,
+            active_tail,
+        } => {
+            let Some((chat, message)) = transcript_message(history, &key, cx) else {
+                return div().into_any_element();
+            };
+            let message_for_toggle = message.clone();
+            let chat = chat.read(cx);
+            let message_state = message.read(cx);
+            let tools = chat.tools_for_state(message_state);
+            render_tool_group(
+                &tools,
+                collapse,
+                active_tail,
+                message_state.tools_expanded,
+                cx.theme(),
+                move |_, _, cx| {
+                    message_for_toggle.update(cx, |message, cx| {
+                        message.toggle_tools();
+                        cx.notify();
+                    });
+                },
+            )
+            .into_any_element()
+        }
+    }
+}
+
+fn transcript_message(
+    history: &WeakEntity<ChatHistory>,
+    key: &HistoryKey,
+    cx: &App,
+) -> Option<(Entity<ChatState>, Entity<MessageState>)> {
+    let chat = history.upgrade()?.read(cx).active_chat.clone()?;
+    let message = chat
+        .read(cx)
+        .messages
+        .iter()
+        .find(|message| &message.read(cx).key == key)?
+        .clone();
+    Some((chat, message))
 }
 
 struct TurnFold {
@@ -370,14 +476,14 @@ fn completed_turn_fold(
     let final_index = (user_index + 1..next_turn).rev().find(|index| {
         let message = messages[*index].read(cx);
         let chat = chat.read(cx);
-        let Some(ThreadItem::AgentMessage { text, phase, .. }) = chat.item_for_state(&message)
+        let Some(ThreadItem::AgentMessage { text, phase, .. }) = chat.item_for_state(message)
         else {
             return false;
         };
         !text.trim().is_empty()
             && matches!(message.stream_state, StreamState::Complete)
             && is_final_answer(phase.as_ref())
-            && chat.has_done_tools_for_state(&message)
+            && chat.has_done_tools_for_state(message)
     })?;
 
     if next_turn == messages.len()
@@ -389,7 +495,7 @@ fn completed_turn_fold(
     let has_progress = (user_index + 1..next_turn).any(|index| index != final_index);
     let final_has_tools = !chat
         .read(cx)
-        .tools_for_state(&messages[final_index].read(cx))
+        .tools_for_state(messages[final_index].read(cx))
         .is_empty();
     if !has_progress && !final_has_tools {
         return None;
@@ -416,7 +522,7 @@ fn has_working_message(
         if !matches!(message.stream_state, StreamState::Streaming) {
             return false;
         }
-        match chat.read(cx).item_for_state(&message) {
+        match chat.read(cx).item_for_state(message) {
             Some(ThreadItem::AgentMessage { .. }) => true,
             Some(item) => is_tool_item(item),
             None => false,
@@ -436,7 +542,7 @@ fn is_active_tool_tail(
 
     let message = messages[index].read(cx);
     matches!(message.stream_state, StreamState::Streaming)
-        && !chat.read(cx).tools_for_state(&message).is_empty()
+        && !chat.read(cx).tools_for_state(message).is_empty()
 }
 
 fn is_user_message(
@@ -445,7 +551,7 @@ fn is_user_message(
     cx: &mut Context<ChatHistory>,
 ) -> bool {
     matches!(
-        chat.read(cx).item_for_state(&message.read(cx)),
+        chat.read(cx).item_for_state(message.read(cx)),
         Some(ThreadItem::UserMessage { .. })
     )
 }

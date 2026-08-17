@@ -3,6 +3,7 @@ mod chat_panel;
 mod side_chat;
 mod sidebar;
 mod state;
+mod transcript;
 mod widgets;
 
 pub use chat_history::ChatHistory;

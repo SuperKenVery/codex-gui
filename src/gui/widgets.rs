@@ -1,20 +1,16 @@
 use std::time::Duration;
 
-use crate::gui::{MessageState, StreamState};
 use codex_app_server_protocol::{
     CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, PatchApplyStatus,
     PatchChangeKind, ThreadItem, UserInput,
 };
-use codex_protocol::models::MessagePhase;
 use gpui::{
-    App, ClickEvent, Entity, IntoElement, ParentElement, SharedString, Styled, Window, div,
-    prelude::*, px,
+    App, ClickEvent, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    text::{TextView, TextViewState},
     theme::Theme,
     v_flex,
 };
@@ -67,59 +63,14 @@ pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
 }
 
 pub(super) fn render_notice(body: &str, theme: &Theme) -> impl IntoElement {
-    message_shell(
-        "",
-        Some(
-            div()
-                .text_sm()
-                .text_color(theme.foreground)
-                .child(body.to_string()),
-        ),
-        theme,
-    )
-}
-
-pub(super) fn render_thread_item_state(
-    item: Option<&ThreadItem>,
-    tools: &[&ThreadItem],
-    state: &MessageState,
-    collapse_tools: bool,
-    hide_tools: bool,
-    active_tool_tail: bool,
-    theme: &Theme,
-    on_toggle_tools: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    match item {
-        Some(ThreadItem::UserMessage { content, .. }) => {
-            user_message_block(&user_input_text(content), theme)
-        }
-        Some(ThreadItem::AgentMessage { text, phase, .. }) => render_assistant_message(
-            text,
-            message_phase(phase.as_ref()),
-            state.stream_state,
-            tools,
-            collapse_tools,
-            hide_tools,
-            active_tool_tail,
-            theme,
-            state.markdown.as_ref(),
-            Some((state.tools_expanded, Box::new(on_toggle_tools))),
-        ),
-        Some(item) if is_tool_item(item) => render_assistant_message(
-            "",
-            AssistantPhase::Commentary,
-            state.stream_state,
-            tools,
-            collapse_tools,
-            hide_tools,
-            active_tool_tail,
-            theme,
-            state.markdown.as_ref(),
-            Some((state.tools_expanded, Box::new(on_toggle_tools))),
-        ),
-        None => notice_message_block(&state.rendered_body, theme, state.markdown.as_ref()),
-        Some(_) => div(),
-    }
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_x_hidden()
+        .py_2()
+        .text_sm()
+        .text_color(theme.foreground)
+        .child(body.to_string())
 }
 
 pub(super) fn render_worked_summary(
@@ -143,76 +94,52 @@ pub(super) fn render_worked_summary(
         )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AssistantPhase {
-    Commentary,
-    FinalAnswer,
+pub(super) fn render_assistant_header(author: &'static str, theme: &Theme) -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .pt_2()
+        .text_xs()
+        .text_color(theme.muted_foreground)
+        .child(author)
 }
 
-fn render_assistant_message(
-    body: &str,
-    phase: AssistantPhase,
-    stream_state: StreamState,
+pub(super) fn render_tool_group(
     tools: &[&ThreadItem],
     collapse_tools: bool,
-    hide_tools: bool,
     active_tool_tail: bool,
+    expanded: bool,
     theme: &Theme,
-    markdown: Option<&Entity<TextViewState>>,
-    tool_toggle: Option<(
-        bool,
-        Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
-    )>,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Div {
-    let mut block = message_block(
-        match (phase, stream_state) {
-            (AssistantPhase::Commentary, _) => "",
-            (AssistantPhase::FinalAnswer, StreamState::Complete) => "Codex",
-            (AssistantPhase::FinalAnswer, StreamState::Streaming) => "Codex is working",
-        },
-        body,
-        theme,
-        markdown,
-    );
-
-    if !hide_tools && !tools.is_empty() {
-        let should_collapse = collapse_tools && !active_tool_tail;
-        let expanded = tool_toggle
-            .as_ref()
-            .map(|(expanded, _)| *expanded)
-            .unwrap_or(false);
-        let tools_view = if should_collapse {
-            let mut tool_group = div().flex().flex_col().gap_2();
-            let summary = match tool_toggle {
-                Some((_, on_toggle)) => render_tool_summary(tools, theme, expanded)
-                    .id(format!("tool-summary-{}", tools[0].id()))
-                    .on_click(on_toggle)
-                    .into_any_element(),
-                None => render_tool_summary(tools, theme, expanded).into_any_element(),
-            };
-            tool_group = tool_group.child(summary);
-            if expanded {
-                tool_group = tool_group.child(render_tool_list(tools, theme));
-            }
-            tool_group.into_any_element()
-        } else {
-            render_tool_list(tools, theme).into_any_element()
-        };
-        block = block.child(tools_view);
+    if tools.is_empty() {
+        return div();
     }
 
-    block
+    let should_collapse = collapse_tools && !active_tool_tail;
+    let tools_view = if should_collapse {
+        let mut tool_group = div().flex().flex_col().gap_2().child(
+            render_tool_summary(tools, theme, expanded)
+                .id(format!("tool-summary-{}", tools[0].id()))
+                .on_click(on_toggle),
+        );
+        if expanded {
+            tool_group = tool_group.child(render_tool_list(tools, theme));
+        }
+        tool_group.into_any_element()
+    } else {
+        render_tool_list(tools, theme).into_any_element()
+    };
+
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_x_hidden()
+        .py_2()
+        .child(tools_view)
 }
 
-fn notice_message_block(
-    body: &str,
-    theme: &Theme,
-    markdown: Option<&Entity<TextViewState>>,
-) -> gpui::Div {
-    message_block("", body, theme, markdown)
-}
-
-fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
+pub(super) fn render_user_message(body: &str, theme: &Theme) -> gpui::Div {
     div()
         .w_full()
         .min_w_0()
@@ -235,53 +162,6 @@ fn user_message_block(body: &str, theme: &Theme) -> gpui::Div {
                 .whitespace_normal()
                 .child(body.to_string()),
         )
-}
-
-fn message_block(
-    author: &'static str,
-    body: &str,
-    theme: &Theme,
-    markdown: Option<&Entity<TextViewState>>,
-) -> gpui::Div {
-    let body = if body.is_empty() {
-        None
-    } else {
-        markdown.map(|markdown| {
-            TextView::new(markdown)
-                .selectable(true)
-                .w_full()
-                .min_w_0()
-                .text_sm()
-                .line_height(px(22.))
-                .text_color(theme.foreground)
-                .into_any_element()
-        })
-    };
-
-    message_shell(author, body, theme)
-}
-
-fn message_shell(author: &'static str, body: Option<impl IntoElement>, theme: &Theme) -> gpui::Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .overflow_x_hidden()
-        .py_2()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .when(!author.is_empty(), |block| {
-            block.child(
-                div()
-                    .min_w_0()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(author),
-            )
-        })
-        .when_some(body, |block, body| {
-            block.child(div().w_full().min_w_0().overflow_x_hidden().child(body))
-        })
 }
 
 fn render_tool_summary(tools: &[&ThreadItem], theme: &Theme, expanded: bool) -> gpui::Div {
@@ -424,7 +304,7 @@ fn tool_call_text(tool: &ThreadItem) -> (String, String) {
     }
 }
 
-fn user_input_text(content: &[UserInput]) -> String {
+pub(super) fn user_input_text(content: &[UserInput]) -> String {
     content
         .iter()
         .filter_map(|input| match input {
@@ -433,23 +313,6 @@ fn user_input_text(content: &[UserInput]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn message_phase(phase: Option<&MessagePhase>) -> AssistantPhase {
-    match phase {
-        Some(MessagePhase::Commentary) => AssistantPhase::Commentary,
-        Some(MessagePhase::FinalAnswer) | None => AssistantPhase::FinalAnswer,
-    }
-}
-
-fn is_tool_item(item: &ThreadItem) -> bool {
-    matches!(
-        item,
-        ThreadItem::CommandExecution { .. }
-            | ThreadItem::FileChange { .. }
-            | ThreadItem::McpToolCall { .. }
-            | ThreadItem::DynamicToolCall { .. }
-    )
 }
 
 fn tool_item_done(item: &ThreadItem) -> bool {
