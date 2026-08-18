@@ -5,13 +5,13 @@ use std::{
 };
 
 use crate::gui::{
-    ChatState, GuiState, HistoryKey, MessageState, StreamState,
+    ChatState, GuiState, MessageState, StreamState,
     transcript::{
         TranscriptBlockStore, TranscriptBlockTarget, TranscriptDocument, TranscriptPlugin,
     },
     widgets::{
         render_assistant_header, render_notice, render_tool_group, render_user_message,
-        render_worked_summary, user_input_text,
+        render_worked_summary, tool_call_views, user_input_text,
     },
 };
 use codex_app_server_protocol::ThreadItem;
@@ -230,13 +230,17 @@ impl ChatHistory {
                     duration: *duration,
                     expanded: *expanded,
                 }),
-                HistoryRow::Message { message, options } => {
-                    let message = message.read(cx);
+                HistoryRow::Message {
+                    message: message_entity,
+                    options,
+                } => {
+                    let message = message_entity.read(cx);
                     let chat = chat.read(cx);
                     match chat.item_for_state(message) {
-                        Some(ThreadItem::UserMessage { .. }) => {
+                        Some(ThreadItem::UserMessage { content, .. }) => {
                             document.push_block(TranscriptBlockTarget::User {
                                 key: message.key.clone(),
+                                body: user_input_text(content).into(),
                             });
                         }
                         Some(ThreadItem::AgentMessage { text, phase, .. }) => {
@@ -255,6 +259,9 @@ impl ChatHistory {
                             if !options.hide_tools && !chat.tools_for_state(message).is_empty() {
                                 document.push_block(TranscriptBlockTarget::Tools {
                                     key: message.key.clone(),
+                                    message: message_entity.clone(),
+                                    tools: tool_call_views(&chat.tools_for_state(message)),
+                                    expanded: message.tools_expanded,
                                     collapse: options.collapse_tools,
                                     active_tail: options.active_tool_tail,
                                 });
@@ -264,6 +271,9 @@ impl ChatHistory {
                             if !options.hide_tools && !chat.tools_for_state(message).is_empty() {
                                 document.push_block(TranscriptBlockTarget::Tools {
                                     key: message.key.clone(),
+                                    message: message_entity.clone(),
+                                    tools: tool_call_views(&chat.tools_for_state(message)),
+                                    expanded: message.tools_expanded,
                                     collapse: options.collapse_tools,
                                     active_tail: options.active_tool_tail,
                                 });
@@ -401,38 +411,23 @@ pub(super) fn render_transcript_block(
                 })
                 .into_any_element()
         }
-        TranscriptBlockTarget::User { key } => {
-            let Some((chat, message)) = transcript_message(history, &key, cx) else {
-                return div().into_any_element();
-            };
-            let text = {
-                let chat = chat.read(cx);
-                let message = message.read(cx);
-                let Some(ThreadItem::UserMessage { content, .. }) = chat.item_for_state(message)
-                else {
-                    return div().into_any_element();
-                };
-                user_input_text(content)
-            };
-            render_user_message(&text, cx.theme()).into_any_element()
+        TranscriptBlockTarget::User { body, .. } => {
+            render_user_message(body, cx.theme()).into_any_element()
         }
         TranscriptBlockTarget::Tools {
-            key,
+            message,
+            tools,
+            expanded,
             collapse,
             active_tail,
+            ..
         } => {
-            let Some((chat, message)) = transcript_message(history, &key, cx) else {
-                return div().into_any_element();
-            };
             let message_for_toggle = message.clone();
-            let chat = chat.read(cx);
-            let message_state = message.read(cx);
-            let tools = chat.tools_for_state(message_state);
             render_tool_group(
                 &tools,
                 collapse,
                 active_tail,
-                message_state.tools_expanded,
+                expanded,
                 cx.theme(),
                 move |_, _, cx| {
                     message_for_toggle.update(cx, |message, cx| {
@@ -444,21 +439,6 @@ pub(super) fn render_transcript_block(
             .into_any_element()
         }
     }
-}
-
-fn transcript_message(
-    history: &WeakEntity<ChatHistory>,
-    key: &HistoryKey,
-    cx: &App,
-) -> Option<(Entity<ChatState>, Entity<MessageState>)> {
-    let chat = history.upgrade()?.read(cx).active_chat.clone()?;
-    let message = chat
-        .read(cx)
-        .messages
-        .iter()
-        .find(|message| &message.read(cx).key == key)?
-        .clone();
-    Some((chat, message))
 }
 
 struct TurnFold {

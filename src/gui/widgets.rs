@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use codex_app_server_protocol::{
     CommandExecutionStatus, DynamicToolCallStatus, McpToolCallStatus, PatchApplyStatus,
@@ -105,7 +105,7 @@ pub(super) fn render_assistant_header(author: &'static str, theme: &Theme) -> gp
 }
 
 pub(super) fn render_tool_group(
-    tools: &[&ThreadItem],
+    tools: &[ToolCallView],
     collapse_tools: bool,
     active_tool_tail: bool,
     expanded: bool,
@@ -120,7 +120,7 @@ pub(super) fn render_tool_group(
     let tools_view = if should_collapse {
         let mut tool_group = div().flex().flex_col().gap_2().child(
             render_tool_summary(tools, theme, expanded)
-                .id(format!("tool-summary-{}", tools[0].id()))
+                .id(format!("tool-summary-{}", tools[0].id))
                 .on_click(on_toggle),
         );
         if expanded {
@@ -139,7 +139,7 @@ pub(super) fn render_tool_group(
         .child(tools_view)
 }
 
-pub(super) fn render_user_message(body: &str, theme: &Theme) -> gpui::Div {
+pub(super) fn render_user_message(body: SharedString, theme: &Theme) -> gpui::Div {
     div()
         .w_full()
         .min_w_0()
@@ -160,12 +160,12 @@ pub(super) fn render_user_message(body: &str, theme: &Theme) -> gpui::Div {
                 .line_height(px(22.))
                 .text_color(theme.secondary_foreground)
                 .whitespace_normal()
-                .child(body.to_string()),
+                .child(body),
         )
 }
 
-fn render_tool_summary(tools: &[&ThreadItem], theme: &Theme, expanded: bool) -> gpui::Div {
-    let running = tools.iter().filter(|tool| !tool_item_done(tool)).count();
+fn render_tool_summary(tools: &[ToolCallView], theme: &Theme, expanded: bool) -> gpui::Div {
+    let running = tools.iter().filter(|tool| !tool.done).count();
     let label = if running > 0 {
         format!(
             "Running {} {}",
@@ -205,21 +205,19 @@ fn disclosure_icon(expanded: bool, theme: &Theme) -> impl IntoElement {
     .text_color(theme.muted_foreground)
 }
 
-fn render_tool_list(tools: &[&ThreadItem], theme: &Theme) -> gpui::Div {
+fn render_tool_list(tools: &[ToolCallView], theme: &Theme) -> gpui::Div {
     tools.iter().fold(
         div().w_full().min_w_0().flex().flex_col().gap_2(),
         |list, tool| list.child(render_tool_call(tool, theme)),
     )
 }
 
-fn render_tool_call(tool: &ThreadItem, theme: &Theme) -> gpui::Div {
-    let (label, color) = if tool_item_done(tool) {
+fn render_tool_call(tool: &ToolCallView, theme: &Theme) -> gpui::Div {
+    let (label, color) = if tool.done {
         ("done", theme.success_foreground)
     } else {
         ("running", theme.warning_foreground)
     };
-    let (title, detail) = tool_call_text(tool);
-
     div()
         .w_full()
         .min_w_0()
@@ -242,7 +240,7 @@ fn render_tool_call(tool: &ThreadItem, theme: &Theme) -> gpui::Div {
                         .text_sm()
                         .text_color(theme.foreground)
                         .whitespace_normal()
-                        .child(title),
+                        .child(tool.title.clone()),
                 )
                 .child(
                     div()
@@ -251,10 +249,34 @@ fn render_tool_call(tool: &ThreadItem, theme: &Theme) -> gpui::Div {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .whitespace_normal()
-                        .child(detail),
+                        .child(tool.detail.clone()),
                 ),
         )
         .child(div().flex_none().text_color(color).text_xs().child(label))
+}
+
+#[derive(Clone)]
+pub(super) struct ToolCallView {
+    id: SharedString,
+    title: SharedString,
+    detail: SharedString,
+    done: bool,
+}
+
+pub(super) fn tool_call_views(tools: &[&ThreadItem]) -> Arc<[ToolCallView]> {
+    tools.iter().map(|tool| ToolCallView::new(tool)).collect()
+}
+
+impl ToolCallView {
+    fn new(tool: &ThreadItem) -> Self {
+        let (title, detail) = tool_call_text(tool);
+        Self {
+            id: tool.id().to_string().into(),
+            title: title.into(),
+            detail: detail.into(),
+            done: tool_item_done(tool),
+        }
+    }
 }
 
 fn tool_call_text(tool: &ThreadItem) -> (String, String) {

@@ -9,8 +9,8 @@ mod results;
 mod thread_mapping;
 
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task, Window, div,
-    prelude::*, transparent_black,
+    Context, Entity, IntoElement, ParentElement, Render, StyleRefinement, Styled, Subscription,
+    Task, Window, div, prelude::*, px, transparent_black,
 };
 use gpui_component::ActiveTheme as _;
 use std::{collections::HashSet, sync::mpsc::Receiver, time::Duration};
@@ -127,7 +127,11 @@ impl Render for CodexGui {
                     div()
                         .flex()
                         .size_full()
-                        .child(self.sidebar.clone())
+                        .child(
+                            self.sidebar.clone().cached(
+                                StyleRefinement::default().w(px(286.)).h_full().flex_none(),
+                            ),
+                        )
                         .child(self.chat_panel.clone())
                         .when(side_chat_open, |this| this.child(self.side_chat.clone())),
                 ),

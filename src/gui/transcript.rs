@@ -5,12 +5,12 @@ use std::{
     time::Duration,
 };
 
-use gpui::{App, EntityId, IntoElement, WeakEntity, Window, div};
+use gpui::{App, Entity, EntityId, IntoElement, SharedString, WeakEntity, Window, div};
 use gpui_component::text::{
     MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast,
 };
 
-use super::{HistoryKey, chat_history::ChatHistory};
+use super::{HistoryKey, MessageState, chat_history::ChatHistory, widgets::ToolCallView};
 
 const BLOCK_TAG: &str = "CodexTranscriptBlock";
 
@@ -20,6 +20,7 @@ pub(super) type TranscriptBlockStore = Arc<RwLock<HashMap<String, TranscriptBloc
 pub(super) enum TranscriptBlockTarget {
     User {
         key: HistoryKey,
+        body: SharedString,
     },
     AssistantHeader {
         key: HistoryKey,
@@ -27,6 +28,9 @@ pub(super) enum TranscriptBlockTarget {
     },
     Tools {
         key: HistoryKey,
+        message: Entity<MessageState>,
+        tools: Arc<[ToolCallView]>,
+        expanded: bool,
         collapse: bool,
         active_tail: bool,
     },
@@ -41,7 +45,7 @@ impl TranscriptBlockTarget {
     fn id(&self) -> String {
         let mut hasher = DefaultHasher::new();
         match self {
-            Self::User { key } => {
+            Self::User { key, .. } => {
                 "user".hash(&mut hasher);
                 key.hash(&mut hasher);
             }
@@ -192,12 +196,14 @@ mod tests {
         let mut before = TranscriptDocument::new();
         before.push_block(TranscriptBlockTarget::User {
             key: HistoryKey::Item("user-1".into()),
+            body: "hello".into(),
         });
         before.push_markdown("A partial reply");
 
         let mut after = TranscriptDocument::new();
         after.push_block(TranscriptBlockTarget::User {
             key: HistoryKey::Item("user-1".into()),
+            body: "hello".into(),
         });
         after.push_markdown("A partial reply with another chunk");
 
@@ -216,21 +222,11 @@ mod tests {
             key: key.clone(),
             label: "Codex is working",
         });
-        before.push_block(TranscriptBlockTarget::Tools {
-            key: key.clone(),
-            collapse: true,
-            active_tail: true,
-        });
 
         let mut after = TranscriptDocument::new();
         after.push_block(TranscriptBlockTarget::AssistantHeader {
-            key: key.clone(),
-            label: "Codex",
-        });
-        after.push_block(TranscriptBlockTarget::Tools {
             key,
-            collapse: false,
-            active_tail: false,
+            label: "Codex",
         });
 
         assert_eq!(after.source, before.source);

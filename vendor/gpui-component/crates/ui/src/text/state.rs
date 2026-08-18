@@ -136,6 +136,14 @@ impl TextViewState {
 
                         match parsed_update.result {
                             Ok(content) => {
+                                if let Some(preserved_block_count) =
+                                    parsed_update.preserved_block_count
+                                {
+                                    state.splice_compatible_layout(
+                                        preserved_block_count,
+                                        content.document.blocks.len(),
+                                    );
+                                }
                                 state.parsed_content = content;
                                 state.parsed_error = None;
                                 state.compatible_layout_update = parsed_update.selection_compatible;
@@ -375,6 +383,23 @@ impl TextViewState {
         }
 
         _ = self.tx.try_send(update_options);
+    }
+
+    /// Preserve measured list rows before the Markdown fragment reparsed by an
+    /// append. Replacing the whole `ListState` here used to make `measure_all`
+    /// lay out every custom block again whenever an append added a top-level
+    /// block, which is especially expensive for transcript plugins.
+    fn splice_compatible_layout(&mut self, preserved_block_count: usize, new_len: usize) {
+        let old_len = self.list_state.item_count();
+        let preserved_block_count = preserved_block_count.min(old_len).min(new_len);
+        self.list_state.splice(
+            preserved_block_count..old_len,
+            new_len - preserved_block_count,
+        );
+        // `splice` keeps the prefix's measured sizes and marks only the new
+        // suffix unmeasured. Re-arm `measure_all` so it fills that suffix and
+        // retains an exact, stable scrollbar height.
+        self.list_state.clone().measure_all();
     }
 
     /// Save bounds and unselect if bounds changed.
@@ -654,6 +679,10 @@ impl Future for UpdateFuture {
                     let hit_coalesce_budget =
                         merge_pending_options(&mut options, self.rx.as_ref().get_ref());
 
+                    let preserved_block_count = options.append.then(|| {
+                        append_reparse_range(&self.content.document)
+                            .map_or(0, |(_, preserved_block_count)| preserved_block_count)
+                    });
                     let res = parse_content(self.format, self.content.clone(), &options);
                     if let Ok(content) = &res {
                         self.content = content.clone();
@@ -662,6 +691,7 @@ impl Future for UpdateFuture {
                         revision: options.revision,
                         full_parse: !options.append,
                         selection_compatible: options.mode == ParseMode::Compatible,
+                        preserved_block_count,
                         baseline_ack: options.mode == ParseMode::BaselineAck,
                         result: res,
                     });
@@ -705,6 +735,7 @@ struct ParsedUpdate {
     revision: usize,
     full_parse: bool,
     selection_compatible: bool,
+    preserved_block_count: Option<usize>,
     baseline_ack: bool,
     result: Result<ParsedContent, SharedString>,
 }
@@ -744,21 +775,9 @@ fn parse_content(
 
     let mut source = String::new();
     let reparse_start = if options.append {
-        let blocks = Arc::make_mut(&mut content.document.blocks);
-        blocks.pop().and_then(|last_block| {
-            let start = last_block.reparse_start()?;
-
-            // A virtualized list is represented by multiple document blocks,
-            // but append parsing still needs the original list prefix so
-            // numbering and Markdown continuation remain correct.
-            while blocks
-                .last()
-                .and_then(|block| block.span())
-                .is_some_and(|span| span.start >= start)
-            {
-                blocks.pop();
-            }
-            Some(start)
+        append_reparse_range(&content.document).map(|(start, preserved_block_count)| {
+            Arc::make_mut(&mut content.document.blocks).truncate(preserved_block_count);
+            start
         })
     } else {
         None
@@ -788,6 +807,27 @@ fn parse_content(
     }
 
     Ok(content)
+}
+
+/// Return the source offset reparsed by an append and the number of document
+/// blocks that remain byte-for-byte compatible before it.
+fn append_reparse_range(document: &ParsedDocument) -> Option<(usize, usize)> {
+    let last_block = document.blocks.last()?;
+    let start = last_block.reparse_start()?;
+    let mut preserved_block_count = document.blocks.len() - 1;
+
+    // A virtualized list is represented by multiple document blocks, but
+    // append parsing must restart at the original list prefix so numbering and
+    // Markdown continuation remain correct.
+    while preserved_block_count > 0
+        && document.blocks[preserved_block_count - 1]
+            .span()
+            .is_some_and(|span| span.start >= start)
+    {
+        preserved_block_count -= 1;
+    }
+
+    Some((start, preserved_block_count))
 }
 
 #[cfg(test)]
@@ -830,6 +870,24 @@ mod tests {
             };
             assert_eq!(*item_ix, expected_ix);
         }
+    }
+
+    #[test]
+    fn append_reports_the_unchanged_block_prefix() {
+        let initial = UpdateOptions {
+            revision: 1,
+            pending_text: "first paragraph\n\nsecond paragraph".into(),
+            append: false,
+            mode: ParseMode::Replace,
+            markdown_extensions: Arc::default(),
+        };
+        let content = parse_content(TextViewFormat::Markdown, ParsedContent::default(), &initial)
+            .expect("initial parse");
+
+        let (start, preserved_block_count) =
+            append_reparse_range(&content.document).expect("append range");
+        assert_eq!(preserved_block_count, 1);
+        assert_eq!(start, "first paragraph\n\n".len());
     }
 
     #[gpui::test]
