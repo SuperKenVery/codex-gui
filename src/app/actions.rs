@@ -73,7 +73,12 @@ impl CodexGui {
 
         if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
             tracing::info!(thread_id, "loading thread");
-            self.request_resume_thread(thread_id, cx);
+            let bridge = self.bridge.clone();
+            cx.spawn(async move |this, cx| {
+                let result = bridge.resume_thread(thread_id).await;
+                let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+            })
+            .detach();
         }
     }
 
@@ -85,7 +90,12 @@ impl CodexGui {
             return;
         };
         tracing::info!(thread_id, "forking thread");
-        self.request_fork_thread(thread_id, cx);
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge.fork_thread(thread_id).await;
+            let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
+        })
+        .detach();
     }
 
     /// Starts an empty thread for the active project.
@@ -99,7 +109,12 @@ impl CodexGui {
             .map(|project| project.read(cx).path.to_string())
             .unwrap_or_else(workspace_path);
         tracing::info!(cwd, "starting thread");
-        self.request_start_thread(cwd, settings, cx);
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge.start_thread(cwd, settings).await;
+            let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
+        })
+        .detach();
     }
 
     /// Handles a composer submit.
@@ -128,7 +143,15 @@ impl CodexGui {
         };
         let settings = self.state.read(cx).chat_settings.clone();
         tracing::info!(thread_id, "starting turn");
-        self.request_send_turn(thread_id, text, settings, cx);
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge
+                .send_turn(thread_id, text, settings)
+                .await
+                .map(|_| ());
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
     }
 
     pub(crate) fn steer_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -147,7 +170,15 @@ impl CodexGui {
             turn_id = active_turn.turn_id,
             "steering turn"
         );
-        self.request_steer_turn(active_thread_id, active_turn.turn_id, text, cx);
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge
+                .steer_turn(active_thread_id, active_turn.turn_id, text)
+                .await
+                .map(|_| ());
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
     }
 
     pub(crate) fn stop_active_turn(&mut self, cx: &mut Context<Self>) {
@@ -159,7 +190,14 @@ impl CodexGui {
             turn_id = active_turn.turn_id,
             "stopping turn"
         );
-        self.request_interrupt_turn(active_turn.thread_id, active_turn.turn_id, cx);
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge
+                .interrupt_turn(active_turn.thread_id, active_turn.turn_id)
+                .await;
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
     }
 
     pub(crate) fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
@@ -223,6 +261,11 @@ impl CodexGui {
         };
         let settings = self.state.read(cx).chat_settings.clone();
         tracing::info!(thread_id, "updating thread settings");
-        self.request_update_thread_settings(thread_id, settings, cx);
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge.update_thread_settings(thread_id, settings).await;
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
     }
 }

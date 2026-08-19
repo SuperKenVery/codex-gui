@@ -38,6 +38,8 @@
             nativeBuildInputs = with pkgs; [
               cmake
               pkg-config
+            ] ++ lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.llvmPackages.lld
             ];
             buildInputs = lib.optionals pkgs.stdenv.isDarwin [
               pkgs.apple-sdk

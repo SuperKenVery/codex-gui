@@ -148,7 +148,15 @@ impl CodexGui {
         if let Some(text) = self.pending_turn_text.take() {
             let settings = self.state.read(cx).chat_settings.clone();
             tracing::info!(thread_id, "starting first turn");
-            self.request_send_turn(thread_id, text, settings, cx);
+            let bridge = self.bridge.clone();
+            cx.spawn(async move |this, cx| {
+                let result = bridge
+                    .send_turn(thread_id, text, settings)
+                    .await
+                    .map(|_| ());
+                let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+            })
+            .detach();
         }
     }
 

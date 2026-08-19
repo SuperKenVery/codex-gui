@@ -21,7 +21,7 @@ impl CodexGui {
         match result {
             Ok(()) => {
                 tracing::info!("started embedded codex app-server");
-                self.request_startup_data(cx);
+                self.load_startup_data(cx);
             }
             Err(err) => self.apply_bridge_error(err.to_string(), cx),
         }
@@ -108,7 +108,12 @@ impl CodexGui {
         let can_resume_default = !self.ui_state.read(cx).new_chat_open;
         if can_resume_default && let Some(thread_id) = default_thread_id {
             tracing::info!(thread_id, "loading thread");
-            self.request_resume_thread(thread_id, cx);
+            let bridge = self.bridge.clone();
+            cx.spawn(async move |this, cx| {
+                let result = bridge.resume_thread(thread_id).await;
+                let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+            })
+            .detach();
         }
     }
 
