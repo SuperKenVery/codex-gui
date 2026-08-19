@@ -2,7 +2,6 @@
 
 mod app;
 mod bridge;
-mod config;
 mod gui;
 mod workspace;
 

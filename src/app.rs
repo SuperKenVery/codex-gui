@@ -1,5 +1,4 @@
 use crate::bridge::{AppServerBridge, BridgeEvent, start_app_server_bridge};
-use crate::config::codex_config_project_paths;
 use crate::gui::{ChatPanel, GuiState, ProjectState, SideChat, Sidebar, UiState};
 use crate::workspace::workspace_path;
 mod actions;
@@ -13,7 +12,7 @@ use gpui::{
     Task, Window, div, prelude::*, px, transparent_black,
 };
 use gpui_component::ActiveTheme as _;
-use std::{collections::HashSet, sync::mpsc::Receiver, time::Duration};
+use std::{sync::mpsc::Receiver, time::Duration};
 
 pub struct CodexGui {
     state: Entity<GuiState>,
@@ -79,26 +78,9 @@ impl CodexGui {
 }
 
 fn initial_projects(cx: &mut Context<CodexGui>) -> Vec<Entity<ProjectState>> {
-    let mut seen = HashSet::new();
-    let mut paths = Vec::new();
-
-    let workspace_path = workspace_path();
-    seen.insert(workspace_path.clone());
-    paths.push(workspace_path);
-
-    for path in codex_config_project_paths() {
-        if seen.insert(path.clone()) {
-            paths.push(path);
-        }
-    }
-
-    paths
-        .into_iter()
-        .map(|path| {
-            let name = thread_mapping::project_name_from_path(&path);
-            cx.new(|_| ProjectState::new(name.into(), path.into(), Vec::new()))
-        })
-        .collect()
+    let path = workspace_path();
+    let name = thread_mapping::project_name_from_path(&path);
+    vec![cx.new(|_| ProjectState::new(name.into(), path.into(), Vec::new()))]
 }
 
 impl Render for CodexGui {

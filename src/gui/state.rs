@@ -243,7 +243,6 @@ pub struct ProjectState {
     pub name: SharedString,
     pub path: SharedString,
     pub chats: Vec<Entity<ChatState>>,
-    pub threads_loaded: bool,
     pub latest_thread_updated_at: Option<i64>,
 }
 
@@ -253,7 +252,6 @@ impl ProjectState {
             name,
             path,
             chats,
-            threads_loaded: false,
             latest_thread_updated_at: None,
         }
     }
@@ -264,7 +262,6 @@ impl ProjectState {
         latest_thread_updated_at: Option<i64>,
     ) {
         self.chats = chats;
-        self.threads_loaded = true;
         self.latest_thread_updated_at = latest_thread_updated_at;
     }
 

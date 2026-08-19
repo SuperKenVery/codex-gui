@@ -2,7 +2,7 @@
 
 use super::{
     CodexGui,
-    thread_mapping::{project_name_from_path, should_start_thread_for_turn},
+    thread_mapping::{empty_chat_entity, project_name_from_path, should_start_thread_for_turn},
 };
 use crate::{
     gui::{ApprovalReviewerMode, ProjectState},
@@ -12,26 +12,10 @@ use gpui::{AppContext, Context};
 
 impl CodexGui {
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
-        let (cwd, should_load_threads) = self
-            .state
-            .read(cx)
-            .projects
-            .get(index)
-            .map(|project| {
-                let project = project.read(cx);
-                (project.path.to_string(), !project.threads_loaded)
-            })
-            .unwrap_or_else(|| (workspace_path(), false));
-
         self.state.update(cx, |state, cx| {
             state.select_project(index);
             cx.notify();
         });
-
-        if should_load_threads {
-            tracing::info!(cwd, "loading project threads");
-            self.request_project_threads(cwd, cx);
-        }
     }
 
     pub(crate) fn open_new_chat(&mut self, cx: &mut Context<Self>) {
@@ -58,7 +42,8 @@ impl CodexGui {
         }
 
         let name = project_name_from_path(path);
-        let project = cx.new(|_| ProjectState::new(name.into(), path.into(), Vec::new()));
+        let empty_chat = empty_chat_entity(cx);
+        let project = cx.new(|_| ProjectState::new(name.into(), path.into(), vec![empty_chat]));
         let index = self.state.update(cx, |state, cx| {
             let index = state.add_project(project);
             cx.notify();

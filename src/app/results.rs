@@ -6,10 +6,11 @@ use super::{
 };
 use crate::{
     bridge::BridgeError,
-    gui::{ModelOption, PermissionProfileOption},
+    gui::{ChatState, ModelOption, PermissionProfileOption, ProjectState},
 };
 use codex_app_server_protocol::Thread;
-use gpui::Context;
+use gpui::{AppContext, Context, Entity};
+use std::collections::{HashMap, HashSet};
 
 impl CodexGui {
     pub(super) fn apply_initialize_result(
@@ -28,10 +29,10 @@ impl CodexGui {
 
     pub(super) fn apply_threads_result(
         &mut self,
-        result: Result<(String, Vec<Thread>), BridgeError>,
+        result: Result<Vec<Thread>, BridgeError>,
         cx: &mut Context<Self>,
     ) {
-        let (cwd, threads) = match result {
+        let threads = match result {
             Ok(result) => result,
             Err(err) => {
                 self.apply_bridge_error(err.to_string(), cx);
@@ -39,46 +40,72 @@ impl CodexGui {
             }
         };
 
-        let latest_thread_updated_at = threads.iter().map(|thread| thread.updated_at).max();
-        let chats = if threads.is_empty() {
-            vec![empty_chat_entity(cx)]
-        } else {
-            threads
-                .into_iter()
-                .map(|thread| chat_entity_from_thread(thread, cx))
-                .collect::<Vec<_>>()
-        };
-        let thread_count = chats.len();
-        let default_thread_id = chats
-            .first()
-            .map(|chat| chat.read(cx).id.clone())
-            .filter(|thread_id| thread_id != "empty");
+        let thread_count = threads.len();
+        let mut project_paths = Vec::new();
+        let mut threads_by_project = HashMap::<String, Vec<Thread>>::new();
+        for thread in threads {
+            let cwd = thread.cwd.to_string_lossy().into_owned();
+            if !threads_by_project.contains_key(&cwd) {
+                project_paths.push(cwd.clone());
+            }
+            threads_by_project.entry(cwd).or_default().push(thread);
+        }
 
-        let project_index = self
-            .state
-            .update(cx, |state, cx| state.project_index_by_path(&cwd, cx));
-        let mut project_was_active = false;
-        if let Some(project_index) = project_index {
-            project_was_active = project_index == self.state.read(cx).active_project;
-            let project = self.state.read(cx).projects[project_index].clone();
+        let existing_projects = self.state.read(cx).projects.clone();
+        let existing_paths = existing_projects
+            .iter()
+            .map(|project| project.read(cx).path.to_string())
+            .collect::<HashSet<_>>();
+
+        for project in existing_projects {
+            let cwd = project.read(cx).path.to_string();
+            let (chats, latest_thread_updated_at) =
+                loaded_chats(threads_by_project.remove(&cwd).unwrap_or_default(), cx);
             project.update(cx, |project, cx| {
                 project.replace_loaded_chats(chats, latest_thread_updated_at);
                 cx.notify();
             });
-            self.state.update(cx, |state, cx| {
-                state.sort_projects_by_recent_activity(cx);
-                cx.notify();
-            });
-            if project_was_active {
-                self.state.update(cx, |state, cx| {
-                    state.select_first_chat();
-                    cx.notify();
-                });
-            }
         }
 
-        tracing::info!(cwd, thread_count, "loaded project threads");
-        let can_resume_default = !self.ui_state.read(cx).new_chat_open && project_was_active;
+        let mut discovered_projects = Vec::new();
+        for cwd in project_paths {
+            if existing_paths.contains(&cwd) {
+                continue;
+            }
+            let Some(threads) = threads_by_project.remove(&cwd) else {
+                continue;
+            };
+            let (chats, latest_thread_updated_at) = loaded_chats(threads, cx);
+            let name = super::thread_mapping::project_name_from_path(&cwd);
+            discovered_projects.push(cx.new(|_| {
+                let mut project = ProjectState::new(name.into(), cwd.into(), chats);
+                project.latest_thread_updated_at = latest_thread_updated_at;
+                project
+            }));
+        }
+
+        self.state.update(cx, |state, cx| {
+            state.projects.extend(discovered_projects);
+            state.sort_projects_by_recent_activity(cx);
+            state.select_first_chat();
+            cx.notify();
+        });
+
+        let default_thread_id = self.state.read(cx).active_project().and_then(|project| {
+            project
+                .read(cx)
+                .chats
+                .first()
+                .map(|chat| chat.read(cx).id.clone())
+                .filter(|thread_id| thread_id != "empty")
+        });
+        let project_count = self.state.read(cx).projects.len();
+        tracing::info!(
+            thread_count,
+            project_count,
+            "loaded threads across projects"
+        );
+        let can_resume_default = !self.ui_state.read(cx).new_chat_open;
         if can_resume_default && let Some(thread_id) = default_thread_id {
             tracing::info!(thread_id, "loading thread");
             self.request_resume_thread(thread_id, cx);
@@ -148,4 +175,20 @@ impl CodexGui {
             self.apply_bridge_error(err.to_string(), cx);
         }
     }
+}
+
+fn loaded_chats(
+    threads: Vec<Thread>,
+    cx: &mut Context<CodexGui>,
+) -> (Vec<Entity<ChatState>>, Option<i64>) {
+    let latest_thread_updated_at = threads.iter().map(|thread| thread.updated_at).max();
+    let chats = if threads.is_empty() {
+        vec![empty_chat_entity(cx)]
+    } else {
+        threads
+            .into_iter()
+            .map(|thread| chat_entity_from_thread(thread, cx))
+            .collect()
+    };
+    (chats, latest_thread_updated_at)
 }

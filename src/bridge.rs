@@ -7,10 +7,9 @@ use codex_app_server_protocol::{
     InitializeResponse, JSONRPCError, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
     ModelListParams, ModelListResponse, PermissionProfileListParams, PermissionProfileListResponse,
     RequestId, ServerNotification, SortDirection, Thread, ThreadForkParams, ThreadForkResponse,
-    ThreadListCwdFilter, ThreadListParams, ThreadListResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSortKey, ThreadSource, ThreadStartParams, ThreadStartResponse,
-    TurnInterruptParams, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
-    UserInput,
+    ThreadListParams, ThreadListResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSortKey,
+    ThreadSource, ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
+    TurnStartResponse, TurnSteerParams, TurnSteerResponse, UserInput,
 };
 use codex_protocol::openai_models::ReasoningEffort;
 use serde::Serialize;
@@ -93,7 +92,7 @@ impl AppServerBridge {
         .await
     }
 
-    pub async fn list_threads(&self, cwd: String) -> BridgeResult<Vec<Thread>> {
+    pub async fn list_threads(&self) -> BridgeResult<Vec<Thread>> {
         let mut threads = Vec::new();
         let mut cursor = None;
 
@@ -109,7 +108,7 @@ impl AppServerBridge {
                         model_providers: None,
                         source_kinds: None,
                         archived: Some(false),
-                        cwd: Some(ThreadListCwdFilter::One(cwd.clone())),
+                        cwd: None,
                         use_state_db_only: false,
                         search_term: None,
                         parent_thread_id: None,
