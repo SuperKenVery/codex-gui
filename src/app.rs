@@ -1,6 +1,6 @@
 use crate::bridge::{AppServerBridge, BridgeEvent, start_app_server_bridge};
 use crate::config::codex_config_project_paths;
-use crate::gui::{BridgeState, ChatPanel, GuiState, ProjectState, SideChat, Sidebar, UiState};
+use crate::gui::{ChatPanel, GuiState, ProjectState, SideChat, Sidebar, UiState};
 use crate::workspace::workspace_path;
 mod actions;
 mod effects;
@@ -18,7 +18,6 @@ use std::{collections::HashSet, sync::mpsc::Receiver, time::Duration};
 pub struct CodexGui {
     state: Entity<GuiState>,
     ui_state: Entity<UiState>,
-    bridge_state: Entity<BridgeState>,
     bridge: AppServerBridge,
     bridge_rx: Receiver<BridgeEvent>,
     pending_turn_text: Option<String>,
@@ -35,19 +34,10 @@ impl CodexGui {
         let initial_projects = initial_projects(cx);
         let state = cx.new(|_| GuiState::new(initial_projects));
         let ui_state = cx.new(|_| UiState::new());
-        let bridge_state = cx.new(|_| BridgeState::new());
         let parent = cx.entity().downgrade();
         let sidebar = cx.new(|cx| Sidebar::new(parent.clone(), state.clone(), cx));
-        let chat_panel = cx.new(|cx| {
-            ChatPanel::new(
-                parent.clone(),
-                state.clone(),
-                ui_state.clone(),
-                bridge_state.clone(),
-                window,
-                cx,
-            )
-        });
+        let chat_panel = cx
+            .new(|cx| ChatPanel::new(parent.clone(), state.clone(), ui_state.clone(), window, cx));
         let side_chat = cx.new(|cx| SideChat::new(state.clone(), cx));
 
         let bridge_task = cx.spawn(async move |this, cx| {
@@ -76,7 +66,6 @@ impl CodexGui {
         Self {
             state,
             ui_state,
-            bridge_state,
             bridge,
             bridge_rx,
             pending_turn_text: None,

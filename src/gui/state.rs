@@ -740,22 +740,6 @@ fn tool_item_done(item: &ThreadItem) -> bool {
     }
 }
 
-pub struct BridgeState {
-    pub status: String,
-}
-
-impl BridgeState {
-    pub fn new() -> Self {
-        Self {
-            status: "starting codex app-server".into(),
-        }
-    }
-
-    pub fn set_status(&mut self, status: impl Into<String>) {
-        self.status = status.into();
-    }
-}
-
 pub struct UiState {
     pub side_chat_open: bool,
     pub new_chat_open: bool,

@@ -1,7 +1,5 @@
 use crate::app::CodexGui;
-use crate::gui::{
-    ApprovalReviewerMode, BridgeState, ChatHistory, GuiState, UiState, widgets::status_pill,
-};
+use crate::gui::{ApprovalReviewerMode, ChatHistory, GuiState, UiState};
 use gpui::{
     Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
     WeakEntity, Window, WindowControlArea, div, prelude::*, px,
@@ -18,7 +16,6 @@ pub struct ChatPanel {
     parent: WeakEntity<CodexGui>,
     state: Entity<GuiState>,
     ui_state: Entity<UiState>,
-    bridge_state: Entity<BridgeState>,
     history: Entity<ChatHistory>,
     composer_input: Entity<TextareaState>,
     project_path_input: Entity<InputState>,
@@ -31,7 +28,6 @@ impl ChatPanel {
         parent: WeakEntity<CodexGui>,
         state: Entity<GuiState>,
         ui_state: Entity<UiState>,
-        bridge_state: Entity<BridgeState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -50,7 +46,6 @@ impl ChatPanel {
         let subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.observe(&ui_state, |_, _, cx| cx.notify()),
-            cx.observe(&bridge_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&composer_input, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     if view.active_chat_turn_running(cx) {
@@ -71,7 +66,6 @@ impl ChatPanel {
             parent,
             state,
             ui_state,
-            bridge_state,
             history,
             composer_input,
             project_path_input,
@@ -543,7 +537,7 @@ impl Render for ChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let new_chat_open =
             self.state.read(cx).active_project().is_some() && self.ui_state.read(cx).new_chat_open;
-        let (title, subtitle, bridge_status) = {
+        let (title, subtitle) = {
             let (project, active_chat) = {
                 let state = self.state.read(cx);
                 (state.active_project(), state.active_chat)
@@ -558,7 +552,7 @@ impl Render for ChatPanel {
                     (chat.title.to_string(), chat.subtitle.to_string())
                 })
                 .unwrap_or_else(|| ("No thread selected".into(), "Start a Codex thread".into()));
-            (title, subtitle, self.bridge_state.read(cx).status.clone())
+            (title, subtitle)
         };
 
         div()
@@ -642,7 +636,6 @@ impl Render for ChatPanel {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .child(status_pill(bridge_status, cx.theme()))
                                     .child(
                                         Button::new("fork-chat")
                                             .small()

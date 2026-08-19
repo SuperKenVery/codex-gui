@@ -20,7 +20,9 @@ impl CodexGui {
             }
             BridgeEvent::RpcError(error) => self.apply_bridge_error(error.error.message, cx),
             BridgeEvent::TransportError(message) => self.apply_bridge_error(message, cx),
-            BridgeEvent::Stderr(status) => self.set_bridge_status(status, cx),
+            BridgeEvent::Stderr(message) => {
+                tracing::info!(target: "codex_app_server", %message, "app-server stderr");
+            }
         }
     }
 
@@ -39,12 +41,16 @@ impl CodexGui {
                 }
             }
             ServerNotification::TurnStarted(params) => {
+                tracing::info!(
+                    thread_id = %params.thread_id,
+                    turn_id = %params.turn.id,
+                    "turn running"
+                );
                 self.upsert_thread_turn(&params.thread_id, params.turn.clone(), cx);
                 self.ui_state.update(cx, |state, cx| {
                     state.start_turn(params.thread_id, params.turn.id);
                     cx.notify();
                 });
-                self.set_bridge_status("turn running", cx);
             }
             ServerNotification::ItemStarted(params) => {
                 self.append_thread_item_data(&params.thread_id, params.item.clone(), cx);
@@ -92,9 +98,10 @@ impl CodexGui {
             }
             ServerNotification::ThreadStatusChanged(params) => {
                 self.update_thread_status(&params.thread_id, params.status.clone(), cx);
-                self.set_bridge_status(
-                    format!("thread {}", thread_status_label(&params.status)),
-                    cx,
+                tracing::info!(
+                    thread_id = %params.thread_id,
+                    status = thread_status_label(&params.status),
+                    "thread status changed"
                 );
             }
             ServerNotification::TurnCompleted(params) => {
@@ -108,7 +115,7 @@ impl CodexGui {
                 });
                 self.finish_completed_tool_messages(&thread_id, cx);
                 self.notify_chat(&thread_id, cx);
-                self.set_bridge_status("turn complete", cx);
+                tracing::info!(thread_id, turn_id, "turn complete");
             }
             ServerNotification::Error(params) => {
                 self.apply_bridge_error(params.error.message, cx);
@@ -141,11 +148,11 @@ impl CodexGui {
             state.close_new_chat();
             cx.notify();
         });
-        self.set_bridge_status("thread ready", cx);
+        tracing::info!(thread_id, "thread ready");
         if let Some(text) = self.pending_turn_text.take() {
             let settings = self.state.read(cx).chat_settings.clone();
+            tracing::info!(thread_id, "starting first turn");
             self.request_send_turn(thread_id, text, settings, cx);
-            self.set_bridge_status("turn running", cx);
         }
     }
 
@@ -169,15 +176,15 @@ impl CodexGui {
                 });
             }
         }
-        self.set_bridge_status("thread loaded", cx);
+        tracing::info!(thread_id, "thread loaded");
     }
 
     pub(super) fn apply_bridge_error(&mut self, message: String, cx: &mut Context<Self>) {
+        tracing::error!(error = %message, "codex app-server error");
         self.ui_state.update(cx, |state, cx| {
             state.clear_active_turn();
             cx.notify();
         });
-        self.set_bridge_status("codex app-server error", cx);
         if let Some(chat) = self.active_chat_entity(cx) {
             let thread_id = chat.read(cx).id.clone();
             self.append_notice(&thread_id, message, cx);

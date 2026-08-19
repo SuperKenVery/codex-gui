@@ -15,6 +15,15 @@ use gpui_component::{Root, Theme};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
 
+#[cfg(not(target_family = "wasm"))]
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("codex_gui=info,codex_app_server=info"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
 fn run_app() {
     application().with_assets(Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
@@ -45,6 +54,7 @@ fn run_app() {
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {
+    init_tracing();
     run_app();
 }
 

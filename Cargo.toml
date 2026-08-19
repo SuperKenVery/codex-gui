@@ -18,6 +18,8 @@ codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.1
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 toml = "0.8.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", features = [

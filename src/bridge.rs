@@ -349,6 +349,7 @@ impl AppServerBridge {
 }
 
 fn run_app_server_bridge(request_rx: Receiver<BridgeRequest>, event_tx: Sender<BridgeEvent>) {
+    tracing::info!("starting codex app-server");
     let mut child = match Command::new("codex")
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())

@@ -28,3 +28,7 @@ Manage environment and packaging with nix and cranelib.
 
 - Keep code clean and maintainable. Split into files or modules when neccessary.
 - When a possible refactor can largely simplify code or easier to read/maintain, actively suggest me
+
+## Dev behavior
+
+- Run quickly. Do NOT run `cargo test` and `cargo clippy` after your code changes. `cargo check` is enough.

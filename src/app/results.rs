@@ -12,13 +12,6 @@ use codex_app_server_protocol::Thread;
 use gpui::Context;
 
 impl CodexGui {
-    pub(super) fn set_bridge_status(&self, status: impl Into<String>, cx: &mut Context<Self>) {
-        self.bridge_state.update(cx, |state, cx| {
-            state.set_status(status);
-            cx.notify();
-        });
-    }
-
     pub(super) fn apply_initialize_result(
         &mut self,
         result: Result<codex_app_server_protocol::InitializeResponse, BridgeError>,
@@ -26,7 +19,7 @@ impl CodexGui {
     ) {
         match result {
             Ok(response) => {
-                self.set_bridge_status(format!("connected: {}", response.user_agent), cx);
+                tracing::info!(user_agent = %response.user_agent, "connected to codex app-server");
                 self.request_startup_data(cx);
             }
             Err(err) => self.apply_bridge_error(err.to_string(), cx),
@@ -55,6 +48,7 @@ impl CodexGui {
                 .map(|thread| chat_entity_from_thread(thread, cx))
                 .collect::<Vec<_>>()
         };
+        let thread_count = chats.len();
         let default_thread_id = chats
             .first()
             .map(|chat| chat.read(cx).id.clone())
@@ -83,11 +77,11 @@ impl CodexGui {
             }
         }
 
-        self.set_bridge_status("connected to codex app-server", cx);
+        tracing::info!(cwd, thread_count, "loaded project threads");
         let can_resume_default = !self.ui_state.read(cx).new_chat_open && project_was_active;
         if can_resume_default && let Some(thread_id) = default_thread_id {
+            tracing::info!(thread_id, "loading thread");
             self.request_resume_thread(thread_id, cx);
-            self.set_bridge_status("loading thread", cx);
         }
     }
 

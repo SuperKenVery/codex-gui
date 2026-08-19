@@ -11,7 +11,7 @@ pub use chat_panel::ChatPanel;
 pub use side_chat::SideChat;
 pub use sidebar::Sidebar;
 pub use state::{
-    ApprovalReviewerMode, BridgeState, ChatSettings, ChatState, GuiState, HistoryEntryKind,
-    HistoryKey, MessageState, ModelOption, PermissionMode, PermissionProfileOption, ProjectState,
-    StreamState, UiState, permission_profile_label,
+    ApprovalReviewerMode, ChatSettings, ChatState, GuiState, HistoryEntryKind, HistoryKey,
+    MessageState, ModelOption, PermissionMode, PermissionProfileOption, ProjectState, StreamState,
+    UiState, permission_profile_label,
 };

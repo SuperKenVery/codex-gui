@@ -51,17 +51,6 @@ pub(super) fn chat_tree_item(
         )
 }
 
-pub(super) fn status_pill(label: String, theme: &Theme) -> impl IntoElement {
-    div()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .bg(theme.secondary)
-        .text_xs()
-        .text_color(theme.secondary_foreground)
-        .child(label)
-}
-
 pub(super) fn render_notice(body: &str, theme: &Theme) -> impl IntoElement {
     div()
         .w_full()
