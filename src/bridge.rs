@@ -150,6 +150,7 @@ impl AppServerBridge {
                         search_term: None,
                         parent_thread_id: None,
                         ancestor_thread_id: None,
+                        section_id: None,
                     },
                 })
                 .await?;
@@ -430,7 +431,7 @@ async fn run_embedded_app_server(
                 };
                 match event {
                     InProcessServerEvent::ServerNotification(notification) => {
-                        let _ = events.send(BridgeEvent::Notification(notification));
+                        let _ = events.send(BridgeEvent::Notification(*notification));
                     }
                     InProcessServerEvent::ServerRequest(request) => {
                         let message = format!("unsupported app-server request: {request:?}");
@@ -491,7 +492,11 @@ async fn build_embedded_client(
         BridgeError::Transport(format!("failed to configure Codex helper paths: {err}"))
     })?;
     let environment_manager =
-        EnvironmentManager::from_codex_home(config.codex_home.clone(), Some(runtime_paths))
+        EnvironmentManager::from_codex_home(
+            config.codex_home.clone(),
+            Some(runtime_paths),
+            config.http_client_factory(),
+        )
             .await
             .map_err(|err| {
                 BridgeError::Transport(format!("failed to initialize Codex environments: {err}"))

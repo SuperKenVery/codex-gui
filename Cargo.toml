@@ -13,11 +13,11 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
 ] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", branch = "main" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", branch = "main" }
-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
-codex-app-server-client = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
-codex-arg0 = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
-codex-core = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
-codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.144.4" }
+codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+codex-app-server-client = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+codex-arg0 = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+codex-core = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
