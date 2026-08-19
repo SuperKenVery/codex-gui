@@ -15,12 +15,12 @@ use std::collections::{HashMap, HashSet};
 impl CodexGui {
     pub(super) fn apply_initialize_result(
         &mut self,
-        result: Result<codex_app_server_protocol::InitializeResponse, BridgeError>,
+        result: Result<(), BridgeError>,
         cx: &mut Context<Self>,
     ) {
         match result {
-            Ok(response) => {
-                tracing::info!(user_agent = %response.user_agent, "connected to codex app-server");
+            Ok(()) => {
+                tracing::info!("started embedded codex app-server");
                 self.request_startup_data(cx);
             }
             Err(err) => self.apply_bridge_error(err.to_string(), cx),

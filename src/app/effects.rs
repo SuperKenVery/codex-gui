@@ -2,7 +2,7 @@
 
 use super::CodexGui;
 use crate::{gui::ChatSettings, workspace::workspace_path};
-use gpui::{AppContext, Context};
+use gpui::Context;
 
 impl CodexGui {
     pub(super) fn request_startup_data(&self, cx: &mut Context<Self>) {
@@ -14,9 +14,7 @@ impl CodexGui {
     pub(super) fn request_models(&self, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.list_models().await })
-                .await;
+            let result = bridge.list_models().await;
             let _ = this.update(cx, |view, cx| view.apply_models_result(result, cx));
         })
         .detach();
@@ -25,9 +23,7 @@ impl CodexGui {
     pub(super) fn request_permission_profiles(&self, cwd: String, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.list_permission_profiles(cwd).await })
-                .await;
+            let result = bridge.list_permission_profiles(cwd).await;
             let _ = this.update(cx, |view, cx| {
                 view.apply_permission_profiles_result(result, cx)
             });
@@ -38,9 +34,7 @@ impl CodexGui {
     pub(super) fn request_threads(&self, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.list_threads().await })
-                .await;
+            let result = bridge.list_threads().await;
             let _ = this.update(cx, |view, cx| view.apply_threads_result(result, cx));
         })
         .detach();
@@ -54,9 +48,7 @@ impl CodexGui {
     ) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.start_thread(cwd, settings).await })
-                .await;
+            let result = bridge.start_thread(cwd, settings).await;
             let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
         })
         .detach();
@@ -65,9 +57,7 @@ impl CodexGui {
     pub(super) fn request_resume_thread(&self, thread_id: String, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.resume_thread(thread_id).await })
-                .await;
+            let result = bridge.resume_thread(thread_id).await;
             let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
         })
         .detach();
@@ -76,9 +66,7 @@ impl CodexGui {
     pub(super) fn request_fork_thread(&self, thread_id: String, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.fork_thread(thread_id).await })
-                .await;
+            let result = bridge.fork_thread(thread_id).await;
             let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
         })
         .detach();
@@ -93,9 +81,7 @@ impl CodexGui {
     ) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.send_turn(thread_id, text, settings).await })
-                .await;
+            let result = bridge.send_turn(thread_id, text, settings).await;
             let _ = this.update(cx, |view, cx| {
                 view.apply_unit_result(result.map(|_| ()), cx)
             });
@@ -112,9 +98,7 @@ impl CodexGui {
     ) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.steer_turn(thread_id, turn_id, text).await })
-                .await;
+            let result = bridge.steer_turn(thread_id, turn_id, text).await;
             let _ = this.update(cx, |view, cx| {
                 view.apply_unit_result(result.map(|_| ()), cx)
             });
@@ -130,9 +114,7 @@ impl CodexGui {
     ) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { bridge.interrupt_turn(thread_id, turn_id).await })
-                .await;
+            let result = bridge.interrupt_turn(thread_id, turn_id).await;
             let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
         })
         .detach();
@@ -146,11 +128,7 @@ impl CodexGui {
     ) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    bridge.update_thread_settings(thread_id, settings).await
-                })
-                .await;
+            let result = bridge.update_thread_settings(thread_id, settings).await;
             let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
         })
         .detach();

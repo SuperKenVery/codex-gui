@@ -7,21 +7,17 @@ use codex_app_server_protocol::{ServerNotification, Thread, ThreadItem};
 use gpui::{AppContext, Context, Entity};
 
 impl CodexGui {
-    pub(super) fn drain_bridge_events(&mut self, cx: &mut Context<Self>) {
-        while let Ok(event) = self.bridge_rx.try_recv() {
-            self.apply_bridge_event(event, cx);
-        }
-    }
-
-    fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
+    pub(super) fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
         match event {
             BridgeEvent::Notification(notification) => {
                 self.apply_server_notification(notification, cx)
             }
-            BridgeEvent::RpcError(error) => self.apply_bridge_error(error.error.message, cx),
             BridgeEvent::TransportError(message) => self.apply_bridge_error(message, cx),
-            BridgeEvent::Stderr(message) => {
-                tracing::info!(target: "codex_app_server", %message, "app-server stderr");
+            BridgeEvent::Lagged { skipped } => {
+                self.apply_bridge_error(
+                    format!("embedded app-server event consumer dropped {skipped} events"),
+                    cx,
+                );
             }
         }
     }

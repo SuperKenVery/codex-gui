@@ -1,4 +1,4 @@
-use crate::bridge::{AppServerBridge, BridgeEvent, start_app_server_bridge};
+use crate::bridge::{AppServerBridge, BridgeEvent};
 use crate::gui::{ChatPanel, GuiState, ProjectState, SideChat, Sidebar, UiState};
 use crate::workspace::workspace_path;
 mod actions;
@@ -12,13 +12,12 @@ use gpui::{
     Task, Window, div, prelude::*, px, transparent_black,
 };
 use gpui_component::ActiveTheme as _;
-use std::{sync::mpsc::Receiver, time::Duration};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct CodexGui {
     state: Entity<GuiState>,
     ui_state: Entity<UiState>,
     bridge: AppServerBridge,
-    bridge_rx: Receiver<BridgeEvent>,
     pending_turn_text: Option<String>,
     sidebar: Entity<Sidebar>,
     chat_panel: Entity<ChatPanel>,
@@ -28,8 +27,12 @@ pub struct CodexGui {
 }
 
 impl CodexGui {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (bridge, bridge_rx) = start_app_server_bridge();
+    pub fn new(
+        bridge: AppServerBridge,
+        mut bridge_rx: UnboundedReceiver<BridgeEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let initial_projects = initial_projects(cx);
         let state = cx.new(|_| GuiState::new(initial_projects));
         let ui_state = cx.new(|_| UiState::new());
@@ -40,12 +43,9 @@ impl CodexGui {
         let side_chat = cx.new(|cx| SideChat::new(state.clone(), cx));
 
         let bridge_task = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
+            while let Some(event) = bridge_rx.recv().await {
                 if this
-                    .update(cx, |view, cx| view.drain_bridge_events(cx))
+                    .update(cx, |view, cx| view.apply_bridge_event(event, cx))
                     .is_err()
                 {
                     break;
@@ -55,24 +55,26 @@ impl CodexGui {
 
         let initialize_bridge = bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { initialize_bridge.initialize().await })
-                .await;
+            let result = initialize_bridge.wait_until_ready().await;
             let _ = this.update(cx, |view, cx| view.apply_initialize_result(result, cx));
         })
         .detach();
+
+        let shutdown_subscription = cx.on_app_quit(|view, _cx| {
+            let bridge = view.bridge.clone();
+            async move { bridge.shutdown().await }
+        });
 
         Self {
             state,
             ui_state,
             bridge,
-            bridge_rx,
             pending_turn_text: None,
             sidebar,
             chat_panel,
             side_chat,
             _bridge_task: bridge_task,
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![shutdown_subscription],
         }
     }
 }
@@ -85,7 +87,6 @@ fn initial_projects(cx: &mut Context<CodexGui>) -> Vec<Entity<ProjectState>> {
 
 impl Render for CodexGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.drain_bridge_events(cx);
         let side_chat_open = self.ui_state.read(cx).side_chat_open;
 
         div()

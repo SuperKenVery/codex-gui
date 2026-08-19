@@ -2,38 +2,64 @@ use crate::gui::{
     ApprovalReviewerMode, ChatSettings, ModelOption, PermissionMode, PermissionProfileOption,
     permission_profile_label,
 };
+use codex_app_server_client::{
+    DEFAULT_IN_PROCESS_CHANNEL_CAPACITY, EnvironmentManager, ExecServerRuntimePaths,
+    InProcessAppServerClient, InProcessAppServerRequestHandle, InProcessClientStartArgs,
+    InProcessServerEvent, TypedRequestError, legacy_core::config::Config,
+};
 use codex_app_server_protocol::{
-    ApprovalsReviewer, AskForApproval, ClientInfo, InitializeCapabilities, InitializeParams,
-    InitializeResponse, JSONRPCError, JSONRPCMessage, JSONRPCNotification, JSONRPCRequest,
+    ApprovalsReviewer, AskForApproval, ClientRequest, ConfigWarningNotification, JSONRPCErrorError,
     ModelListParams, ModelListResponse, PermissionProfileListParams, PermissionProfileListResponse,
     RequestId, ServerNotification, SortDirection, Thread, ThreadForkParams, ThreadForkResponse,
-    ThreadListParams, ThreadListResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSortKey,
-    ThreadSource, ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, TurnSteerResponse, UserInput,
+    ThreadListParams, ThreadListResponse, ThreadResumeParams, ThreadResumeResponse,
+    ThreadSettingsUpdateParams, ThreadSettingsUpdateResponse, ThreadSortKey, ThreadSource,
+    ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
+    TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse, UserInput,
 };
-use codex_protocol::openai_models::ReasoningEffort;
-use serde::Serialize;
+use codex_arg0::Arg0DispatchPaths;
+use codex_protocol::{openai_models::ReasoningEffort, protocol::SessionSource};
 use serde::de::DeserializeOwned;
 use std::{
-    collections::HashMap,
     fmt,
-    io::{BufRead, BufReader, Write},
-    process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, Sender},
-    thread,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc, watch},
 };
 
 #[derive(Clone)]
 pub struct AppServerBridge {
-    request_tx: Sender<BridgeRequest>,
+    inner: Arc<BridgeInner>,
+}
+
+struct BridgeInner {
+    client_state: watch::Receiver<ClientState>,
+    shutdown_tx: watch::Sender<bool>,
+    next_request_id: AtomicI64,
+}
+
+impl Drop for BridgeInner {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
+#[derive(Clone)]
+enum ClientState {
+    Starting,
+    Ready(InProcessAppServerRequestHandle),
+    Failed(String),
+    Stopped,
 }
 
 pub enum BridgeEvent {
     Notification(ServerNotification),
-    RpcError(JSONRPCError),
     TransportError(String),
-    Stderr(String),
+    Lagged { skipped: usize },
 }
 
 #[derive(Debug)]
@@ -56,40 +82,51 @@ impl fmt::Display for BridgeError {
 impl std::error::Error for BridgeError {}
 
 type BridgeResult<T> = Result<T, BridgeError>;
-type ResponseResult = Result<serde_json::Value, BridgeError>;
 
-struct BridgeRequest {
-    method: &'static str,
-    params: serde_json::Value,
-    response_tx: Sender<ResponseResult>,
-}
+pub fn start_app_server_bridge(
+    runtime: Handle,
+    arg0_paths: Arg0DispatchPaths,
+) -> (AppServerBridge, mpsc::UnboundedReceiver<BridgeEvent>) {
+    let (client_state_tx, client_state_rx) = watch::channel(ClientState::Starting);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-pub fn start_app_server_bridge() -> (AppServerBridge, Receiver<BridgeEvent>) {
-    let (request_tx, request_rx) = mpsc::channel();
-    let (event_tx, event_rx) = mpsc::channel();
+    runtime.spawn(run_embedded_app_server(
+        arg0_paths,
+        client_state_tx,
+        shutdown_rx,
+        event_tx,
+    ));
 
-    thread::spawn(move || run_app_server_bridge(request_rx, event_tx));
-
-    (AppServerBridge { request_tx }, event_rx)
+    (
+        AppServerBridge {
+            inner: Arc::new(BridgeInner {
+                client_state: client_state_rx,
+                shutdown_tx,
+                next_request_id: AtomicI64::new(1),
+            }),
+        },
+        event_rx,
+    )
 }
 
 impl AppServerBridge {
-    pub async fn initialize(&self) -> BridgeResult<InitializeResponse> {
-        self.request(
-            "initialize",
-            InitializeParams {
-                client_info: ClientInfo {
-                    name: "codex-gui".into(),
-                    title: Some("codex-gui".into()),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                },
-                capabilities: Some(InitializeCapabilities {
-                    experimental_api: true,
-                    ..Default::default()
-                }),
-            },
-        )
-        .await
+    pub async fn wait_until_ready(&self) -> BridgeResult<()> {
+        self.request_handle().await.map(|_| ())
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = self.inner.shutdown_tx.send(true);
+        let mut state = self.inner.client_state.clone();
+        loop {
+            match &*state.borrow() {
+                ClientState::Failed(_) | ClientState::Stopped => return,
+                ClientState::Starting | ClientState::Ready(_) => {}
+            }
+            if state.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     pub async fn list_threads(&self) -> BridgeResult<Vec<Thread>> {
@@ -98,9 +135,9 @@ impl AppServerBridge {
 
         loop {
             let response: ThreadListResponse = self
-                .request(
-                    "thread/list",
-                    ThreadListParams {
+                .request(|request_id| ClientRequest::ThreadList {
+                    request_id,
+                    params: ThreadListParams {
                         cursor,
                         limit: Some(100),
                         sort_key: Some(ThreadSortKey::UpdatedAt),
@@ -114,12 +151,11 @@ impl AppServerBridge {
                         parent_thread_id: None,
                         ancestor_thread_id: None,
                     },
-                )
+                })
                 .await?;
 
             threads.extend(response.data);
             cursor = response.next_cursor;
-
             if cursor.is_none() {
                 break;
             }
@@ -130,14 +166,14 @@ impl AppServerBridge {
 
     pub async fn list_models(&self) -> BridgeResult<Vec<ModelOption>> {
         let response: ModelListResponse = self
-            .request(
-                "model/list",
-                ModelListParams {
+            .request(|request_id| ClientRequest::ModelList {
+                request_id,
+                params: ModelListParams {
                     cursor: None,
                     limit: None,
                     include_hidden: None,
                 },
-            )
+            })
             .await?;
         Ok(response
             .data
@@ -161,14 +197,14 @@ impl AppServerBridge {
         cwd: String,
     ) -> BridgeResult<Vec<PermissionProfileOption>> {
         let response: PermissionProfileListResponse = self
-            .request(
-                "permissionProfile/list",
-                PermissionProfileListParams {
+            .request(|request_id| ClientRequest::PermissionProfileList {
+                request_id,
+                params: PermissionProfileListParams {
                     cursor: None,
                     limit: None,
                     cwd: Some(cwd),
                 },
-            )
+            })
             .await?;
         Ok(response
             .data
@@ -183,9 +219,9 @@ impl AppServerBridge {
 
     pub async fn start_thread(&self, cwd: String, settings: ChatSettings) -> BridgeResult<Thread> {
         let response: ThreadStartResponse = self
-            .request(
-                "thread/start",
-                ThreadStartParams {
+            .request(|request_id| ClientRequest::ThreadStart {
+                request_id,
+                params: ThreadStartParams {
                     cwd: Some(cwd),
                     model: Some(settings.model.clone()),
                     approval_policy: Some(approval_policy_for(&settings)),
@@ -195,33 +231,33 @@ impl AppServerBridge {
                     thread_source: Some(ThreadSource::User),
                     ..Default::default()
                 },
-            )
+            })
             .await?;
         Ok(response.thread)
     }
 
     pub async fn resume_thread(&self, thread_id: String) -> BridgeResult<Thread> {
         let response: ThreadResumeResponse = self
-            .request(
-                "thread/resume",
-                ThreadResumeParams {
+            .request(|request_id| ClientRequest::ThreadResume {
+                request_id,
+                params: ThreadResumeParams {
                     thread_id,
                     ..Default::default()
                 },
-            )
+            })
             .await?;
         Ok(response.thread)
     }
 
     pub async fn fork_thread(&self, thread_id: String) -> BridgeResult<Thread> {
         let response: ThreadForkResponse = self
-            .request(
-                "thread/fork",
-                ThreadForkParams {
+            .request(|request_id| ClientRequest::ThreadFork {
+                request_id,
+                params: ThreadForkParams {
                     thread_id,
                     ..Default::default()
                 },
-            )
+            })
             .await?;
         Ok(response.thread)
     }
@@ -232,9 +268,9 @@ impl AppServerBridge {
         text: String,
         settings: ChatSettings,
     ) -> BridgeResult<TurnStartResponse> {
-        self.request(
-            "turn/start",
-            TurnStartParams {
+        self.request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
                 thread_id,
                 client_user_message_id: None,
                 input: vec![UserInput::Text {
@@ -259,7 +295,7 @@ impl AppServerBridge {
                 collaboration_mode: None,
                 multi_agent_mode: None,
             },
-        )
+        })
         .await
     }
 
@@ -269,9 +305,9 @@ impl AppServerBridge {
         turn_id: String,
         text: String,
     ) -> BridgeResult<TurnSteerResponse> {
-        self.request(
-            "turn/steer",
-            TurnSteerParams {
+        self.request(|request_id| ClientRequest::TurnSteer {
+            request_id,
+            params: TurnSteerParams {
                 thread_id,
                 client_user_message_id: None,
                 input: vec![UserInput::Text {
@@ -282,14 +318,18 @@ impl AppServerBridge {
                 additional_context: None,
                 expected_turn_id: turn_id,
             },
-        )
+        })
         .await
     }
 
     pub async fn interrupt_turn(&self, thread_id: String, turn_id: String) -> BridgeResult<()> {
-        self.request_value("turn/interrupt", TurnInterruptParams { thread_id, turn_id })
-            .await
-            .map(|_| ())
+        let _: TurnInterruptResponse = self
+            .request(|request_id| ClientRequest::TurnInterrupt {
+                request_id,
+                params: TurnInterruptParams { thread_id, turn_id },
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn update_thread_settings(
@@ -297,231 +337,190 @@ impl AppServerBridge {
         thread_id: String,
         settings: ChatSettings,
     ) -> BridgeResult<()> {
-        self.request_value(
-            "thread/settings/update",
-            ThreadSettingsUpdateParamsJson {
-                thread_id,
-                approval_policy: Some(approval_policy_for(&settings)),
-                approvals_reviewer: Some(approvals_reviewer_for(&settings)),
-                permissions: Some(settings.permission_profile),
-                model: Some(settings.model),
-                effort: Some(settings.effort),
-            },
-        )
-        .await
-        .map(|_| ())
-    }
-
-    async fn request<T, P>(&self, method: &'static str, params: P) -> BridgeResult<T>
-    where
-        T: DeserializeOwned,
-        P: Serialize,
-    {
-        let value = self.request_value(method, params).await?;
-        serde_json::from_value(value).map_err(|err| {
-            BridgeError::Decode(format!("Invalid app-server response for {method}: {err}"))
-        })
-    }
-
-    async fn request_value<P>(
-        &self,
-        method: &'static str,
-        params: P,
-    ) -> BridgeResult<serde_json::Value>
-    where
-        P: Serialize,
-    {
-        let params = serde_json::to_value(params)
-            .map_err(|err| BridgeError::Decode(format!("Invalid request params: {err}")))?;
-        let (response_tx, response_rx) = mpsc::channel();
-        self.request_tx
-            .send(BridgeRequest {
-                method,
-                params,
-                response_tx,
+        let _: ThreadSettingsUpdateResponse = self
+            .request(|request_id| ClientRequest::ThreadSettingsUpdate {
+                request_id,
+                params: ThreadSettingsUpdateParams {
+                    thread_id,
+                    approval_policy: Some(approval_policy_for(&settings)),
+                    approvals_reviewer: Some(approvals_reviewer_for(&settings)),
+                    permissions: Some(settings.permission_profile.clone()),
+                    model: Some(settings.model.clone()),
+                    effort: Some(reasoning_effort_for(&settings)),
+                    ..Default::default()
+                },
             })
-            .map_err(|_| BridgeError::Transport("codex app-server writer stopped".into()))?;
-        response_rx.recv().map_err(|_| {
-            BridgeError::Transport("codex app-server response channel closed".into())
-        })?
+            .await?;
+        Ok(())
+    }
+
+    async fn request<T>(&self, build: impl FnOnce(RequestId) -> ClientRequest) -> BridgeResult<T>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let client = self.request_handle().await?;
+        let request_id =
+            RequestId::Integer(self.inner.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let request = build(request_id);
+        client
+            .request_typed(request)
+            .await
+            .map_err(BridgeError::from)
+    }
+
+    async fn request_handle(&self) -> BridgeResult<InProcessAppServerRequestHandle> {
+        let mut state = self.inner.client_state.clone();
+        loop {
+            let snapshot = state.borrow().clone();
+            match snapshot {
+                ClientState::Ready(client) => return Ok(client),
+                ClientState::Failed(message) => return Err(BridgeError::Transport(message)),
+                ClientState::Stopped => {
+                    return Err(BridgeError::Transport("embedded app-server stopped".into()));
+                }
+                ClientState::Starting => {}
+            }
+            state.changed().await.map_err(|_| {
+                BridgeError::Transport("embedded app-server startup task stopped".into())
+            })?;
+        }
     }
 }
 
-fn run_app_server_bridge(request_rx: Receiver<BridgeRequest>, event_tx: Sender<BridgeEvent>) {
-    tracing::info!("starting codex app-server");
-    let mut child = match Command::new("codex")
-        .args(["app-server", "--stdio"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(err) => {
-            let _ = event_tx.send(BridgeEvent::TransportError(format!(
-                "Failed to start codex app-server: {err}"
-            )));
+impl From<TypedRequestError> for BridgeError {
+    fn from(error: TypedRequestError) -> Self {
+        match error {
+            TypedRequestError::Transport { source, .. } => Self::Transport(source.to_string()),
+            TypedRequestError::Server { source, .. } => Self::Rpc(source.message),
+            TypedRequestError::Deserialize { source, .. } => Self::Decode(source.to_string()),
+        }
+    }
+}
+
+async fn run_embedded_app_server(
+    arg0_paths: Arg0DispatchPaths,
+    client_state: watch::Sender<ClientState>,
+    mut shutdown: watch::Receiver<bool>,
+    events: mpsc::UnboundedSender<BridgeEvent>,
+) {
+    let mut client = match build_embedded_client(arg0_paths).await {
+        Ok(client) => client,
+        Err(error) => {
+            client_state.send_replace(ClientState::Failed(error.to_string()));
             return;
         }
     };
 
-    let Some(mut stdin) = child.stdin.take() else {
-        let _ = event_tx.send(BridgeEvent::TransportError(
-            "codex app-server stdin unavailable".into(),
-        ));
-        return;
-    };
-    let Some(stdout) = child.stdout.take() else {
-        let _ = event_tx.send(BridgeEvent::TransportError(
-            "codex app-server stdout unavailable".into(),
-        ));
-        return;
-    };
-
-    if let Some(stderr) = child.stderr.take() {
-        let event_tx = event_tx.clone();
-        thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if !line.trim().is_empty() {
-                    let _ = event_tx.send(BridgeEvent::Stderr(line));
+    client_state.send_replace(ClientState::Ready(client.request_handle()));
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
                 }
             }
-        });
-    }
-
-    let (line_tx, line_rx) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = line_tx.send(line);
-        }
-    });
-
-    let mut requests = PendingRequests::default();
-    let mut next_id = 1_i64;
-
-    loop {
-        while let Ok(request) = request_rx.try_recv() {
-            if let Err(err) = send_request(request, &mut requests, &mut next_id, &mut stdin) {
-                let _ = err.response_tx.send(Err(BridgeError::Transport(format!(
-                    "Failed to send codex app-server request: {}",
-                    err.error
-                ))));
+            event = client.next_event() => {
+                let Some(event) = event else {
+                    if !*shutdown.borrow() {
+                        let _ = events.send(BridgeEvent::TransportError(
+                            "embedded app-server event stream closed".into(),
+                        ));
+                    }
+                    break;
+                };
+                match event {
+                    InProcessServerEvent::ServerNotification(notification) => {
+                        let _ = events.send(BridgeEvent::Notification(notification));
+                    }
+                    InProcessServerEvent::ServerRequest(request) => {
+                        let message = format!("unsupported app-server request: {request:?}");
+                        let error = JSONRPCErrorError {
+                            code: -32601,
+                            message: message.clone(),
+                            data: None,
+                        };
+                        if let Err(reject_error) = client
+                            .reject_server_request(request.id().clone(), error)
+                            .await
+                        {
+                            let _ = events.send(BridgeEvent::TransportError(format!(
+                                "{message}; failed to reject it: {reject_error}",
+                            )));
+                        } else {
+                            let _ = events.send(BridgeEvent::TransportError(message));
+                        }
+                    }
+                    InProcessServerEvent::Lagged { skipped } => {
+                        let _ = events.send(BridgeEvent::Lagged { skipped });
+                    }
+                }
             }
         }
-
-        match line_rx.recv_timeout(Duration::from_millis(20)) {
-            Ok(line) => handle_server_line(&line, &event_tx, &mut requests),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let message = "codex app-server stdout stream closed".to_string();
-                requests.close_all(&message);
-                let _ = event_tx.send(BridgeEvent::TransportError(message));
-                break;
-            }
-        }
     }
 
-    let _ = child.kill();
+    if let Err(error) = client.shutdown().await {
+        let _ = events.send(BridgeEvent::TransportError(format!(
+            "failed to shut down embedded app-server: {error}",
+        )));
+    }
+    client_state.send_replace(ClientState::Stopped);
 }
 
-#[derive(Default)]
-struct PendingRequests(HashMap<i64, Sender<ResponseResult>>);
-
-impl PendingRequests {
-    fn insert(&mut self, id: i64, response_tx: Sender<ResponseResult>) {
-        self.0.insert(id, response_tx);
-    }
-
-    fn remove(&mut self, id: i64) -> Option<Sender<ResponseResult>> {
-        self.0.remove(&id)
-    }
-
-    fn close_all(&mut self, message: &str) {
-        for (_, response_tx) in self.0.drain() {
-            let _ = response_tx.send(Err(BridgeError::Transport(message.to_string())));
-        }
-    }
-}
-
-struct SendRequestError {
-    response_tx: Sender<ResponseResult>,
-    error: std::io::Error,
-}
-
-fn send_request(
-    request: BridgeRequest,
-    requests: &mut PendingRequests,
-    next_id: &mut i64,
-    stdin: &mut impl Write,
-) -> Result<(), SendRequestError> {
-    let id = *next_id;
-    *next_id += 1;
-
-    let rpc_request = JSONRPCRequest {
-        id: RequestId::Integer(id),
-        method: request.method.into(),
-        params: Some(request.params),
-        trace: None,
-    };
-    let serialized = serde_json::to_string(&rpc_request).map_err(|error| SendRequestError {
-        response_tx: request.response_tx.clone(),
-        error: std::io::Error::other(error),
+async fn build_embedded_client(
+    arg0_paths: Arg0DispatchPaths,
+) -> BridgeResult<InProcessAppServerClient> {
+    let cli_overrides = Vec::new();
+    let config = Config::load_with_cli_overrides(cli_overrides.clone())
+        .await
+        .map_err(|err| BridgeError::Transport(format!("failed to load Codex config: {err}")))?;
+    let config_warnings = config
+        .startup_warnings
+        .iter()
+        .map(|warning| ConfigWarningNotification {
+            summary: warning.clone(),
+            details: None,
+            path: None,
+            range: None,
+        })
+        .collect();
+    let runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+        arg0_paths.codex_self_exe.clone(),
+        arg0_paths.codex_linux_sandbox_exe.clone(),
+    )
+    .map_err(|err| {
+        BridgeError::Transport(format!("failed to configure Codex helper paths: {err}"))
     })?;
+    let environment_manager =
+        EnvironmentManager::from_codex_home(config.codex_home.clone(), Some(runtime_paths))
+            .await
+            .map_err(|err| {
+                BridgeError::Transport(format!("failed to initialize Codex environments: {err}"))
+            })?;
+    let state_db = codex_core::init_state_db(&config).await;
 
-    if let Err(error) = writeln!(stdin, "{serialized}").and_then(|_| stdin.flush()) {
-        return Err(SendRequestError {
-            response_tx: request.response_tx,
-            error,
-        });
-    }
-
-    requests.insert(id, request.response_tx);
-    Ok(())
-}
-
-fn handle_server_line(line: &str, event_tx: &Sender<BridgeEvent>, requests: &mut PendingRequests) {
-    let parsed: JSONRPCMessage = match serde_json::from_str(line) {
-        Ok(value) => value,
-        Err(err) => {
-            let _ = event_tx.send(BridgeEvent::TransportError(format!(
-                "Invalid app-server JSON: {err}: {line}"
-            )));
-            return;
-        }
-    };
-
-    match parsed {
-        JSONRPCMessage::Response(response) => {
-            if let Some(response_tx) =
-                request_id_i64(&response.id).and_then(|id| requests.remove(id))
-            {
-                let _ = response_tx.send(Ok(response.result));
-            }
-        }
-        JSONRPCMessage::Error(error) => {
-            if let Some(response_tx) = request_id_i64(&error.id).and_then(|id| requests.remove(id))
-            {
-                let _ = response_tx.send(Err(BridgeError::Rpc(format!(
-                    "app-server error: {}",
-                    error.error.message
-                ))));
-            }
-            let _ = event_tx.send(BridgeEvent::RpcError(error));
-        }
-        JSONRPCMessage::Notification(notification) => handle_notification(notification, event_tx),
-        JSONRPCMessage::Request(_) => {}
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ThreadSettingsUpdateParamsJson {
-    thread_id: String,
-    approval_policy: Option<AskForApproval>,
-    approvals_reviewer: Option<ApprovalsReviewer>,
-    permissions: Option<String>,
-    model: Option<String>,
-    effort: Option<String>,
+    InProcessAppServerClient::start(InProcessClientStartArgs {
+        arg0_paths,
+        config: Arc::new(config),
+        cli_overrides,
+        loader_overrides: Default::default(),
+        strict_config: false,
+        cloud_config_bundle: Default::default(),
+        feedback: Default::default(),
+        log_db: None,
+        state_db,
+        environment_manager: Arc::new(environment_manager),
+        config_warnings,
+        session_source: SessionSource::Custom("codex-gui".into()),
+        enable_codex_api_key_env: true,
+        client_name: "codex-gui".into(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        experimental_api: true,
+        mcp_server_openai_form_elicitation: false,
+        opt_out_notification_methods: Vec::new(),
+        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await
+    .map_err(|err| BridgeError::Transport(format!("failed to start embedded app-server: {err}")))
 }
 
 fn approval_policy_for(settings: &ChatSettings) -> AskForApproval {
@@ -543,25 +542,5 @@ fn approvals_reviewer_for(settings: &ChatSettings) -> ApprovalsReviewer {
     match settings.approvals_reviewer {
         ApprovalReviewerMode::User => ApprovalsReviewer::User,
         ApprovalReviewerMode::AutoReview => ApprovalsReviewer::AutoReview,
-    }
-}
-
-fn handle_notification(notification: JSONRPCNotification, event_tx: &Sender<BridgeEvent>) {
-    match ServerNotification::try_from(notification) {
-        Ok(notification) => {
-            let _ = event_tx.send(BridgeEvent::Notification(notification));
-        }
-        Err(err) => {
-            let _ = event_tx.send(BridgeEvent::TransportError(format!(
-                "Invalid app-server notification: {err}"
-            )));
-        }
-    }
-}
-
-fn request_id_i64(id: &RequestId) -> Option<i64> {
-    match id {
-        RequestId::Integer(id) => Some(*id),
-        RequestId::String(_) => None,
     }
 }
