@@ -8,8 +8,8 @@ mod workspace;
 
 use app::CodexGui;
 use gpui::{
-    App, AppContext, Bounds, Styled, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
-    transparent_black,
+    App, AppContext, Bounds, Styled, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, point, px, size, transparent_black,
 };
 use gpui_component::{Root, Theme};
 use gpui_component_assets::Assets;
@@ -29,7 +29,7 @@ fn run_app() {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(9.), px(9.))),
                 }),
-                // window_background: WindowBackgroundAppearance::Blurred,
+                window_background: WindowBackgroundAppearance::Blurred,
                 ..Default::default()
             },
             |window, cx| {
