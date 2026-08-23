@@ -103,8 +103,8 @@ pub(super) fn render_user_message(body: SharedString, theme: &Theme) -> gpui::Di
                 .bg(theme.secondary)
                 .px_3()
                 .py_2()
-                .text_sm()
-                .line_height(px(22.))
+                .text_base()
+                .line_height(px(30.))
                 .text_color(theme.secondary_foreground)
                 .whitespace_normal()
                 .child(body),
