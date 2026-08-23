@@ -82,6 +82,34 @@ impl CodexGui {
         }
     }
 
+    pub(crate) fn select_projectless_chat(&mut self, index: usize, cx: &mut Context<Self>) {
+        let thread_id = self
+            .state
+            .read(cx)
+            .projectless_chats
+            .get(index)
+            .map(|chat| chat.read(cx).id.clone());
+
+        self.state.update(cx, |state, cx| {
+            state.select_projectless_chat(index);
+            cx.notify();
+        });
+        self.ui_state.update(cx, |state, cx| {
+            state.close_new_chat();
+            cx.notify();
+        });
+
+        if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
+            tracing::info!(thread_id, "loading thread");
+            let bridge = self.bridge.clone();
+            cx.spawn(async move |this, cx| {
+                let result = bridge.resume_thread(thread_id).await;
+                let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+            })
+            .detach();
+        }
+    }
+
     pub(crate) fn fork_chat(&mut self, cx: &mut Context<Self>) {
         let Some(thread_id) = self
             .active_chat_entity(cx)

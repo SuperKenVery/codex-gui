@@ -9,6 +9,7 @@ use crate::{
     gui::{ChatState, ModelOption, PermissionProfileOption, ProjectState},
 };
 use codex_app_server_protocol::Thread;
+use codex_core::config::find_codex_home;
 use gpui::{AppContext, Context, Entity};
 use std::collections::{HashMap, HashSet};
 
@@ -36,14 +37,31 @@ impl CodexGui {
             Ok(result) => result,
             Err(err) => {
                 self.apply_bridge_error(err.to_string(), cx);
+                self.state.update(cx, |state, cx| {
+                    state.threads_loaded = true;
+                    cx.notify();
+                });
                 return;
             }
         };
 
         let thread_count = threads.len();
+        let projectless_ids = projectless_thread_ids();
         let mut project_paths = Vec::new();
         let mut threads_by_project = HashMap::<String, Vec<Thread>>::new();
+        let mut projectless_threads = Vec::new();
+        let mut default_thread: Option<(i64, String)> = None;
         for thread in threads {
+            let is_newest = default_thread
+                .as_ref()
+                .is_none_or(|(updated_at, _)| thread.updated_at > *updated_at);
+            if is_newest {
+                default_thread = Some((thread.updated_at, thread.id.clone()));
+            }
+            if projectless_ids.contains(&thread.id) {
+                projectless_threads.push(thread);
+                continue;
+            }
             let cwd = thread.cwd.to_string_lossy().into_owned();
             if !threads_by_project.contains_key(&cwd) {
                 project_paths.push(cwd.clone());
@@ -84,29 +102,40 @@ impl CodexGui {
             }));
         }
 
+        let projectless_chats = if projectless_threads.is_empty() {
+            Vec::new()
+        } else {
+            loaded_chats(projectless_threads, cx).0
+        };
+
         self.state.update(cx, |state, cx| {
             state.projects.extend(discovered_projects);
+            state.projectless_chats = projectless_chats;
             state.sort_projects_by_recent_activity(cx);
             state.select_first_chat();
+            state.threads_loaded = true;
             cx.notify();
         });
 
-        let default_thread_id = self.state.read(cx).active_project().and_then(|project| {
-            project
-                .read(cx)
-                .chats
-                .first()
-                .map(|chat| chat.read(cx).id.clone())
-                .filter(|thread_id| thread_id != "empty")
-        });
         let project_count = self.state.read(cx).projects.len();
+        let projectless_count = self.state.read(cx).projectless_chats.len();
         tracing::info!(
             thread_count,
             project_count,
-            "loaded threads across projects"
+            projectless_count,
+            "loaded threads from app server"
         );
         let can_resume_default = !self.ui_state.read(cx).new_chat_open;
-        if can_resume_default && let Some(thread_id) = default_thread_id {
+        if can_resume_default && let Some((_, thread_id)) = default_thread {
+            if projectless_ids.contains(&thread_id) {
+                self.state.update(cx, |state, cx| {
+                    state.active_projectless_chat = state
+                        .projectless_chats
+                        .iter()
+                        .position(|chat| chat.read(cx).id == thread_id);
+                    cx.notify();
+                });
+            }
             tracing::info!(thread_id, "loading thread");
             let bridge = self.bridge.clone();
             cx.spawn(async move |this, cx| {
@@ -196,4 +225,51 @@ fn loaded_chats(
             .collect()
     };
     (chats, latest_thread_updated_at)
+}
+
+/// Thread IDs that the Codex desktop marks as project-less, so they are shown
+/// outside of any project group in the sidebar.
+fn projectless_thread_ids() -> HashSet<String> {
+    let Ok(home) = find_codex_home() else {
+        return HashSet::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(home.join(".codex-global-state.json")) else {
+        return HashSet::new();
+    };
+    parse_projectless_thread_ids(&contents)
+}
+
+fn parse_projectless_thread_ids(contents: &str) -> HashSet<String> {
+    let Ok(state) = serde_json::from_str::<serde_json::Value>(contents) else {
+        return HashSet::new();
+    };
+    state
+        .get("projectless-thread-ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_projectless_thread_ids() {
+        let ids = parse_projectless_thread_ids(
+            r#"{"projectless-thread-ids": ["abc", "def"], "other": 1}"#,
+        );
+        assert_eq!(ids, HashSet::from(["abc".to_string(), "def".to_string()]));
+    }
+
+    #[test]
+    fn missing_projectless_field_is_empty() {
+        assert!(parse_projectless_thread_ids(r#"{"other": []}"#).is_empty());
+        assert!(parse_projectless_thread_ids("not json").is_empty());
+    }
 }

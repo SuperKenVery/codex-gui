@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::gui::{
+    ChatState, GuiState, MessageState, StreamState,
     transcript::{
         TranscriptBlockStore, TranscriptBlockTarget, TranscriptDocument, TranscriptPlugin,
     },
@@ -12,18 +13,17 @@ use crate::gui::{
         render_assistant_header, render_notice, render_tool_group, render_user_message,
         render_worked_summary, tool_call_views, user_input_text,
     },
-    ChatState, GuiState, MessageState, StreamState,
 };
 use codex_app_server_protocol::ThreadItem;
 use codex_protocol::models::MessagePhase;
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, Entity, EntityId, IntoElement, ParentElement,
-    Render, Styled, Subscription, WeakEntity, Window,
+    AnyElement, App, Context, Entity, EntityId, IntoElement, ParentElement, Render, Styled,
+    Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::{
+    ActiveTheme as _,
     clipboard::Clipboard,
     text::{MarkdownExtensions, TextView, TextViewState},
-    ActiveTheme as _,
 };
 
 pub struct ChatHistory {
@@ -569,12 +569,5 @@ fn active_chat_entity(
     state: &Entity<GuiState>,
     cx: &mut Context<ChatHistory>,
 ) -> Option<Entity<ChatState>> {
-    let (project, active_chat) = {
-        let state = state.read(cx);
-        (state.active_project(), state.active_chat)
-    };
-    project.and_then(|project| {
-        let chats = project.read(cx).chats.clone();
-        chats.get(active_chat).cloned()
-    })
+    state.read(cx).active_chat_entity(cx)
 }

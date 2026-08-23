@@ -1,6 +1,5 @@
 use crate::bridge::{AppServerBridge, BridgeEvent};
-use crate::gui::{ChatPanel, GuiState, ProjectState, SideChat, Sidebar, UiState};
-use crate::workspace::workspace_path;
+use crate::gui::{ChatPanel, GuiState, SideChat, Sidebar, UiState};
 mod actions;
 mod effects;
 mod event_handler;
@@ -33,8 +32,7 @@ impl CodexGui {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial_projects = initial_projects(cx);
-        let state = cx.new(|_| GuiState::new(initial_projects));
+        let state = cx.new(|_| GuiState::new());
         let ui_state = cx.new(|_| UiState::new());
         let parent = cx.entity().downgrade();
         let sidebar = cx.new(|cx| Sidebar::new(parent.clone(), state.clone(), cx));
@@ -77,12 +75,6 @@ impl CodexGui {
             _subscriptions: vec![shutdown_subscription],
         }
     }
-}
-
-fn initial_projects(cx: &mut Context<CodexGui>) -> Vec<Entity<ProjectState>> {
-    let path = workspace_path();
-    let name = thread_mapping::project_name_from_path(&path);
-    vec![cx.new(|_| ProjectState::new(name.into(), path.into(), Vec::new()))]
 }
 
 impl Render for CodexGui {

@@ -21,18 +21,12 @@ impl SideChat {
 
 impl Render for SideChat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let thread_title = {
-            let (project, active_chat) = {
-                let state = self.state.read(cx);
-                (state.active_project(), state.active_chat)
-            };
-            let chat = project.and_then(|project| {
-                let chats = project.read(cx).chats.clone();
-                chats.get(active_chat).cloned()
-            });
-            chat.map(|chat| chat.read(cx).title.to_string())
-                .unwrap_or_else(|| "No thread".into())
-        };
+        let thread_title = self
+            .state
+            .read(cx)
+            .active_chat_entity(cx)
+            .map(|chat| chat.read(cx).title.to_string())
+            .unwrap_or_else(|| "No thread".into());
 
         div()
             .w(px(340.))

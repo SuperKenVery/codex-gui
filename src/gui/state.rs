@@ -5,27 +5,45 @@ use std::{
 };
 
 use codex_app_server_protocol::{FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn};
-use gpui::{Context, Entity, SharedString};
+use gpui::{AppContext, Context, Entity, SharedString};
 
 pub struct GuiState {
     pub projects: Vec<Entity<ProjectState>>,
+    pub projectless_chats: Vec<Entity<ChatState>>,
     pub active_project: usize,
     pub active_chat: usize,
+    pub active_projectless_chat: Option<usize>,
+    /// Whether the app server has answered the initial thread listing.
+    pub threads_loaded: bool,
     pub chat_settings: ChatSettings,
     pub available_models: Vec<ModelOption>,
     pub permission_profiles: Vec<PermissionProfileOption>,
 }
 
 impl GuiState {
-    pub fn new(projects: Vec<Entity<ProjectState>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            projects,
+            projects: Vec::new(),
+            projectless_chats: Vec::new(),
             active_project: 0,
             active_chat: 0,
+            active_projectless_chat: None,
+            threads_loaded: false,
             chat_settings: ChatSettings::default(),
             available_models: Vec::new(),
             permission_profiles: default_permission_profiles(),
         }
+    }
+
+    /// The currently selected chat, whether it lives under a project or in the
+    /// project-less chat list.
+    pub fn active_chat_entity(&self, cx: &impl AppContext) -> Option<Entity<ChatState>> {
+        if let Some(index) = self.active_projectless_chat {
+            return self.projectless_chats.get(index).cloned();
+        }
+        let project = self.projects.get(self.active_project)?;
+        let chats = project.read_with(cx, |project, _| project.chats.clone());
+        chats.get(self.active_chat).cloned()
     }
 
     pub fn active_project(&self) -> Option<Entity<ProjectState>> {
@@ -41,6 +59,7 @@ impl GuiState {
     pub fn select_project(&mut self, index: usize) {
         self.active_project = index;
         self.active_chat = 0;
+        self.active_projectless_chat = None;
     }
 
     pub fn sort_projects_by_recent_activity(&mut self, cx: &mut Context<Self>) {
@@ -89,12 +108,19 @@ impl GuiState {
 
     pub fn select_chat(&mut self, index: usize) {
         self.active_chat = index;
+        self.active_projectless_chat = None;
+    }
+
+    pub fn select_projectless_chat(&mut self, index: usize) {
+        self.active_projectless_chat = Some(index);
+        self.active_chat = 0;
     }
 
     pub fn add_project(&mut self, project: Entity<ProjectState>) -> usize {
         self.projects.push(project);
         self.active_project = self.projects.len() - 1;
         self.active_chat = 0;
+        self.active_projectless_chat = None;
         self.active_project
     }
 

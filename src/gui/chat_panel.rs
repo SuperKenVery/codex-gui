@@ -116,18 +116,12 @@ impl ChatPanel {
     }
 
     fn active_chat_turn_running(&self, cx: &mut Context<Self>) -> bool {
-        let (project, active_chat) = {
-            let state = self.state.read(cx);
-            (state.active_project(), state.active_chat)
-        };
-        let active_thread_id = project.and_then(|project| {
-            project
-                .read(cx)
-                .chats
-                .get(active_chat)
-                .map(|chat| chat.read(cx).id.clone())
-        });
-        let Some(active_thread_id) = active_thread_id else {
+        let Some(active_thread_id) = self
+            .state
+            .read(cx)
+            .active_chat_entity(cx)
+            .map(|chat| chat.read(cx).id.clone())
+        else {
             return false;
         };
         self.ui_state
@@ -537,23 +531,15 @@ impl Render for ChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let new_chat_open =
             self.state.read(cx).active_project().is_some() && self.ui_state.read(cx).new_chat_open;
-        let (title, subtitle) = {
-            let (project, active_chat) = {
-                let state = self.state.read(cx);
-                (state.active_project(), state.active_chat)
-            };
-            let chat = project.and_then(|project| {
-                let chats = project.read(cx).chats.clone();
-                chats.get(active_chat).cloned()
-            });
-            let (title, subtitle) = chat
-                .map(|chat| {
-                    let chat = chat.read(cx);
-                    (chat.title.to_string(), chat.subtitle.to_string())
-                })
-                .unwrap_or_else(|| ("No thread selected".into(), "Start a Codex thread".into()));
-            (title, subtitle)
-        };
+        let (title, subtitle) = self
+            .state
+            .read(cx)
+            .active_chat_entity(cx)
+            .map(|chat| {
+                let chat = chat.read(cx);
+                (chat.title.to_string(), chat.subtitle.to_string())
+            })
+            .unwrap_or_else(|| ("No thread selected".into(), "Start a Codex thread".into()));
 
         div()
             .flex_1()

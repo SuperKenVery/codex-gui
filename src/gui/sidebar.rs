@@ -8,41 +8,63 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     scroll::ScrollableElement as _,
+    spinner::Spinner,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 const SIDEBAR_ROW_HEIGHT: gpui::Pixels = px(34.);
 const SIDEBAR_LIST_OVERDRAW: gpui::Pixels = px(170.);
+const PAGE_SIZE: usize = 10;
 
 pub struct Sidebar {
     parent: WeakEntity<CodexGui>,
     state: Entity<GuiState>,
     should_move_window: bool,
     collapsed_projects: HashSet<String>,
-    expanded_thread_projects: HashSet<String>,
+    visible_project_count: usize,
+    visible_projectless_count: usize,
+    project_chat_visible_counts: HashMap<String, usize>,
     list_state: ListState,
     list_active_project: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum SidebarRow<Project, Chat> {
+    /// "Projects" or "Chats" label
+    SectionHeader { label: &'static str },
+    /// Project folder that contains chats in it
     Project {
         project_index: usize,
         project: Project,
         selected: bool,
         expanded: bool,
     },
+    /// A thread with a user-specified project dir
     Chat {
         project_index: usize,
         chat_index: usize,
         chat: Chat,
         selected: bool,
     },
-    ShowMore {
-        project_index: usize,
-        path: String,
+    /// A project-less chat
+    ProjectlessChat {
+        chat_index: usize,
+        chat: Chat,
+        selected: bool,
     },
+    /// Show more/show all button
+    ShowMore { kind: PaginateKind },
+}
+
+#[derive(Clone, Debug)]
+enum PaginateKind {
+    Projects,
+    ProjectlessChats,
+    ProjectChats { path: String },
 }
 
 impl Sidebar {
@@ -57,7 +79,9 @@ impl Sidebar {
             state,
             should_move_window: false,
             collapsed_projects: HashSet::new(),
-            expanded_thread_projects: HashSet::new(),
+            visible_project_count: PAGE_SIZE,
+            visible_projectless_count: PAGE_SIZE,
+            project_chat_visible_counts: HashMap::new(),
             list_state: ListState::new(0, ListAlignment::Top, SIDEBAR_LIST_OVERDRAW)
                 .with_uniform_item_height(SIDEBAR_ROW_HEIGHT),
             list_active_project: None,
@@ -66,14 +90,12 @@ impl Sidebar {
     }
 
     fn toggle_project(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((path, is_active)) = self.state.read(cx).projects.get(index).map(|project| {
-            (
-                project.read(cx).path.to_string(),
-                index == self.state.read(cx).active_project,
-            )
-        }) else {
+        let state = self.state.read(cx);
+        let Some(project) = state.projects.get(index) else {
             return;
         };
+        let path = project.read(cx).path.to_string();
+        let is_active = index == state.active_project && state.active_projectless_chat.is_none();
 
         if is_active {
             if !self.collapsed_projects.insert(path.clone()) {
@@ -90,8 +112,34 @@ impl Sidebar {
         });
     }
 
-    fn show_all_threads(&mut self, path: String, cx: &mut Context<Self>) {
-        self.expanded_thread_projects.insert(path);
+    fn show_more(&mut self, kind: PaginateKind, cx: &mut Context<Self>) {
+        match kind {
+            PaginateKind::Projects => {
+                self.visible_project_count = self.visible_project_count.saturating_add(PAGE_SIZE);
+            }
+            PaginateKind::ProjectlessChats => {
+                self.visible_projectless_count =
+                    self.visible_projectless_count.saturating_add(PAGE_SIZE);
+            }
+            PaginateKind::ProjectChats { path } => {
+                let count = self
+                    .project_chat_visible_counts
+                    .entry(path)
+                    .or_insert(PAGE_SIZE);
+                *count = count.saturating_add(PAGE_SIZE);
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_all(&mut self, kind: PaginateKind, cx: &mut Context<Self>) {
+        match kind {
+            PaginateKind::Projects => self.visible_project_count = usize::MAX,
+            PaginateKind::ProjectlessChats => self.visible_projectless_count = usize::MAX,
+            PaginateKind::ProjectChats { path } => {
+                self.project_chat_visible_counts.insert(path, usize::MAX);
+            }
+        }
         cx.notify();
     }
 
@@ -99,6 +147,13 @@ impl Sidebar {
         let parent = self.parent.clone();
         cx.defer(move |cx| {
             let _ = parent.update(cx, |parent, cx| parent.select_chat(index, cx));
+        });
+    }
+
+    fn select_projectless_chat(&mut self, index: usize, cx: &mut Context<Self>) {
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.select_projectless_chat(index, cx));
         });
     }
 
@@ -112,53 +167,80 @@ impl Sidebar {
 
 fn build_sidebar_rows<Project: Clone, Chat: Clone>(
     projects: &[Project],
+    visible_project_count: usize,
+    projectless_chats: &[Chat],
+    visible_projectless_count: usize,
     active_project: usize,
     active_chat: usize,
+    active_projectless_chat: Option<usize>,
     active_project_path: Option<&str>,
     active_project_chats: &[Chat],
+    visible_project_chat_count: usize,
     collapsed_projects: &HashSet<String>,
-    expanded_thread_projects: &HashSet<String>,
 ) -> Vec<SidebarRow<Project, Chat>> {
-    let mut rows = Vec::with_capacity(projects.len() + 6);
+    let mut rows = Vec::with_capacity(projects.len() + projectless_chats.len() + 6);
 
-    for (project_index, project) in projects.iter().enumerate() {
-        let selected = project_index == active_project;
-        let expanded =
-            selected && active_project_path.is_some_and(|path| !collapsed_projects.contains(path));
-        rows.push(SidebarRow::Project {
-            project_index,
-            project: project.clone(),
-            selected,
-            expanded,
-        });
+    if !projects.is_empty() {
+        rows.push(SidebarRow::SectionHeader { label: "Projects" });
+        for (project_index, project) in projects.iter().take(visible_project_count).enumerate() {
+            let selected = project_index == active_project && active_projectless_chat.is_none();
+            let expanded = selected
+                && active_project_path.is_some_and(|path| !collapsed_projects.contains(path));
+            rows.push(SidebarRow::Project {
+                project_index,
+                project: project.clone(),
+                selected,
+                expanded,
+            });
 
-        if !expanded {
-            continue;
+            if !expanded {
+                continue;
+            }
+
+            let path = active_project_path.expect("an expanded project always has a path");
+            rows.extend(
+                active_project_chats
+                    .iter()
+                    .take(visible_project_chat_count)
+                    .enumerate()
+                    .map(|(chat_index, chat)| SidebarRow::Chat {
+                        project_index,
+                        chat_index,
+                        chat: chat.clone(),
+                        selected: chat_index == active_chat,
+                    }),
+            );
+            if active_project_chats.len() > visible_project_chat_count {
+                rows.push(SidebarRow::ShowMore {
+                    kind: PaginateKind::ProjectChats {
+                        path: path.to_owned(),
+                    },
+                });
+            }
         }
+        if projects.len() > visible_project_count {
+            rows.push(SidebarRow::ShowMore {
+                kind: PaginateKind::Projects,
+            });
+        }
+    }
 
-        let path = active_project_path.expect("an expanded project always has a path");
-        let show_all = expanded_thread_projects.contains(path);
-        let visible_thread_count = if show_all {
-            active_project_chats.len()
-        } else {
-            active_project_chats.len().min(5)
-        };
+    if !projectless_chats.is_empty() {
+        rows.push(SidebarRow::SectionHeader { label: "Chats" });
         rows.extend(
-            active_project_chats
+            projectless_chats
                 .iter()
-                .take(visible_thread_count)
+                .take(visible_projectless_count)
                 .enumerate()
-                .map(|(chat_index, chat)| SidebarRow::Chat {
-                    project_index,
+                .map(|(chat_index, chat)| SidebarRow::ProjectlessChat {
                     chat_index,
                     chat: chat.clone(),
-                    selected: chat_index == active_chat,
+                    selected: active_projectless_chat == Some(chat_index),
                 }),
         );
-        if active_project_chats.len() > visible_thread_count {
+        if projectless_chats.len() > visible_projectless_count {
             rows.push(SidebarRow::ShowMore {
-                project_index,
-                path: path.to_owned(),
+                kind: PaginateKind::ProjectlessChats,
             });
         }
     }
@@ -172,6 +254,16 @@ fn render_sidebar_row(
     cx: &mut App,
 ) -> gpui::AnyElement {
     let content = match row {
+        SidebarRow::SectionHeader { label } => div()
+            .flex()
+            .items_center()
+            .size_full()
+            .px_2()
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(cx.theme().muted_foreground)
+            .child(label)
+            .into_any_element(),
         SidebarRow::Project {
             project_index,
             project,
@@ -250,32 +342,79 @@ fn render_sidebar_row(
             })
             .into_any_element()
         }
-        SidebarRow::ShowMore {
-            project_index,
-            path,
+        SidebarRow::ProjectlessChat {
+            chat_index,
+            chat,
+            selected,
         } => {
+            let (title, subtitle) = {
+                let chat = chat.read(cx);
+                (chat.title.clone(), chat.subtitle.clone())
+            };
             let sidebar = sidebar.clone();
-            Button::new(format!("show-more-threads-{project_index}"))
+            chat_tree_item(
+                format!("projectless-chat-{chat_index}"),
+                title,
+                subtitle,
+                selected,
+                cx.theme(),
+            )
+            .h_full()
+            .on_click(move |_, _, cx| {
+                let _ = sidebar.update(cx, |view, cx| view.select_projectless_chat(chat_index, cx));
+            })
+            .into_any_element()
+        }
+        SidebarRow::ShowMore { kind } => {
+            let sidebar_more = sidebar.clone();
+            let sidebar_all = sidebar.clone();
+            let more_kind = kind.clone();
+            let all_kind = kind.clone();
+            let more = Button::new(format!("show-more-{kind:?}"))
                 .ghost()
-                .w_full()
                 .h_full()
+                .flex_1()
                 .with_size(px(0.))
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .justify_center()
                         .size_full()
-                        .pl_7()
-                        .pr_2()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("显示更多"),
+                        .child("Show more"),
                 )
                 .on_click(move |_, _, cx| {
-                    let path = path.clone();
-                    let _ = sidebar.update(cx, |view, cx| view.show_all_threads(path, cx));
-                })
+                    let kind = more_kind.clone();
+                    let _ = sidebar_more.update(cx, |view, cx| view.show_more(kind, cx));
+                });
+            let all = Button::new(format!("show-all-{kind:?}"))
+                .ghost()
+                .h_full()
+                .flex_1()
+                .with_size(px(0.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size_full()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Show all"),
+                )
+                .on_click(move |_, _, cx| {
+                    let kind = all_kind.clone();
+                    let _ = sidebar_all.update(cx, |view, cx| view.show_all(kind, cx));
+                });
+            div()
+                .flex()
+                .gap_2()
+                .w_full()
+                .h_full()
+                .child(more)
+                .child(all)
                 .into_any_element()
         }
     };
@@ -290,12 +429,22 @@ fn render_sidebar_row(
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (projects, active_project, active_chat) = {
+        let (
+            projects,
+            projectless_chats,
+            active_project,
+            active_chat,
+            active_projectless_chat,
+            threads_loaded,
+        ) = {
             let state = self.state.read(cx);
             (
                 state.projects.clone(),
+                state.projectless_chats.clone(),
                 state.active_project,
                 state.active_chat,
+                state.active_projectless_chat,
+                state.threads_loaded,
             )
         };
         let (active_project_path, active_project_chats) = projects
@@ -305,25 +454,43 @@ impl Render for Sidebar {
                 (Some(project.path.to_string()), project.chats.clone())
             })
             .unwrap_or_default();
+        let visible_project_count = self.visible_project_count.min(projects.len());
+        let visible_projectless_count = self.visible_projectless_count.min(projectless_chats.len());
+        let visible_project_chat_count = self
+            .project_chat_visible_counts
+            .get(active_project_path.as_deref().unwrap_or_default())
+            .copied()
+            .unwrap_or(PAGE_SIZE)
+            .min(active_project_chats.len());
         let rows = Arc::new(build_sidebar_rows(
             &projects,
+            visible_project_count,
+            &projectless_chats,
+            visible_projectless_count,
             active_project,
             active_chat,
+            active_projectless_chat,
             active_project_path.as_deref(),
             &active_project_chats,
+            visible_project_chat_count,
             &self.collapsed_projects,
-            &self.expanded_thread_projects,
         ));
         let item_count_changed = self.list_state.item_count() != rows.len();
         if item_count_changed {
             self.list_state
                 .reset_with_uniform_height(rows.len(), SIDEBAR_ROW_HEIGHT);
         }
-        if !rows.is_empty()
+        let active_project_row = rows.iter().position(|row| {
+            matches!(
+                row,
+                SidebarRow::Project { project_index, .. } if *project_index == active_project
+            )
+        });
+        if active_project_row.is_some()
             && (item_count_changed || self.list_active_project != Some(active_project))
         {
             self.list_state
-                .scroll_to_reveal_item(active_project.min(rows.len() - 1));
+                .scroll_to_reveal_item(active_project_row.expect("checked above"));
         }
         self.list_active_project = Some(active_project);
         let sidebar = cx.entity().downgrade();
@@ -392,15 +559,46 @@ impl Render for Sidebar {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(
-                        list(self.list_state.clone(), move |index, _, cx| {
-                            rows.get(index)
-                                .cloned()
-                                .map(|row| render_sidebar_row(row, &sidebar, cx))
-                                .unwrap_or_else(|| div().into_any_element())
-                        })
-                        .size_full(),
-                    )
+                    .child(if threads_loaded {
+                        if rows.is_empty() {
+                            div()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("No threads yet"),
+                                )
+                                .into_any_element()
+                        } else {
+                            list(self.list_state.clone(), move |index, _, cx| {
+                                rows.get(index)
+                                    .cloned()
+                                    .map(|row| render_sidebar_row(row, &sidebar, cx))
+                                    .unwrap_or_else(|| div().into_any_element())
+                            })
+                            .size_full()
+                            .into_any_element()
+                        }
+                    } else {
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .child(Spinner::new().small().color(cx.theme().muted_foreground))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Loading threads…"),
+                            )
+                            .into_any_element()
+                    })
                     .vertical_scrollbar(&self.list_state),
             )
     }
@@ -416,17 +614,22 @@ mod tests {
         let chats = (0..8).collect::<Vec<_>>();
         let rows = build_sidebar_rows(
             &projects,
+            projects.len(),
+            &[] as &[i32],
+            0,
             1,
             2,
+            None,
             Some("two"),
             &chats,
-            &HashSet::new(),
+            5,
             &HashSet::new(),
         );
 
-        assert_eq!(rows.len(), 9); // 3 projects + 5 chats + show-more.
+        assert_eq!(rows.len(), 10); // header + 3 projects + 5 chats + show-more.
+        assert!(matches!(rows[0], SidebarRow::SectionHeader { .. }));
         assert!(matches!(
-            rows[1],
+            rows[2],
             SidebarRow::Project {
                 project_index: 1,
                 expanded: true,
@@ -434,31 +637,112 @@ mod tests {
             }
         ));
         assert!(matches!(
-            rows[4],
+            rows[5],
             SidebarRow::Chat {
                 chat_index: 2,
                 selected: true,
                 ..
             }
         ));
-        assert!(matches!(rows[7], SidebarRow::ShowMore { .. }));
+        assert!(matches!(rows[8], SidebarRow::ShowMore { .. }));
     }
 
     #[test]
-    fn show_all_and_collapse_change_only_the_flattened_rows() {
-        let projects = vec!["one", "two"];
-        let chats = (0..8).collect::<Vec<_>>();
-        let expanded = HashSet::from(["one".to_string()]);
+    fn projectless_chats_render_in_their_own_section() {
+        let projects = vec!["one"];
+        let projectless = vec![10, 11, 12];
         let rows = build_sidebar_rows(
             &projects,
+            projects.len(),
+            &projectless,
+            projectless.len(),
             0,
             0,
+            Some(1),
+            Some("one"),
+            &[] as &[i32],
+            0,
+            &HashSet::new(),
+        );
+
+        assert_eq!(rows.len(), 5); // projects header + project + chats header + 3 chats.
+        assert!(matches!(rows[0], SidebarRow::SectionHeader { .. }));
+        assert!(matches!(
+            rows[1],
+            SidebarRow::Project {
+                selected: false,
+                expanded: false,
+                ..
+            }
+        ));
+        assert!(matches!(rows[2], SidebarRow::SectionHeader { .. }));
+        assert!(matches!(
+            rows[3],
+            SidebarRow::ProjectlessChat {
+                chat_index: 0,
+                selected: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[4],
+            SidebarRow::ProjectlessChat {
+                chat_index: 2,
+                selected: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pagination_adds_show_more_rows_for_both_sections() {
+        let projects = (0..15).collect::<Vec<_>>();
+        let projectless = (0..15).collect::<Vec<_>>();
+        let rows = build_sidebar_rows(
+            &projects,
+            10,
+            &projectless,
+            10,
+            0,
+            0,
+            None,
+            Some("0"),
+            &[] as &[i32],
+            0,
+            &HashSet::new(),
+        );
+
+        assert_eq!(rows.len(), 24); // header + 10 projects + show-more + header + 10 chats + show-more.
+        let kinds = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::ShowMore { kind } => Some(kind),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kinds.len(), 2);
+        assert!(matches!(kinds[0], PaginateKind::Projects));
+        assert!(matches!(kinds[1], PaginateKind::ProjectlessChats));
+    }
+
+    #[test]
+    fn expanded_show_all_and_collapse_change_only_the_flattened_rows() {
+        let projects = vec!["one", "two"];
+        let chats = (0..8).collect::<Vec<_>>();
+        let rows = build_sidebar_rows(
+            &projects,
+            projects.len(),
+            &[] as &[i32],
+            0,
+            0,
+            0,
+            None,
             Some("one"),
             &chats,
+            chats.len(),
             &HashSet::new(),
-            &expanded,
         );
-        assert_eq!(rows.len(), 10); // 2 projects + all 8 chats.
+        assert_eq!(rows.len(), 11); // header + 2 projects + all 8 chats.
         assert!(
             !rows
                 .iter()
@@ -466,11 +750,23 @@ mod tests {
         );
 
         let collapsed = HashSet::from(["one".to_string()]);
-        let rows = build_sidebar_rows(&projects, 0, 0, Some("one"), &chats, &collapsed, &expanded);
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter()
-                .all(|row| matches!(row, SidebarRow::Project { .. }))
+        let rows = build_sidebar_rows(
+            &projects,
+            projects.len(),
+            &[] as &[i32],
+            0,
+            0,
+            0,
+            None,
+            Some("one"),
+            &chats,
+            chats.len(),
+            &collapsed,
         );
+        assert_eq!(rows.len(), 3); // header + 2 project rows.
+        assert!(rows.iter().all(|row| matches!(
+            row,
+            SidebarRow::Project { .. } | SidebarRow::SectionHeader { .. }
+        )));
     }
 }

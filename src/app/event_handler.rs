@@ -123,9 +123,10 @@ impl CodexGui {
     pub(super) fn apply_thread_started(&mut self, thread: Thread, cx: &mut Context<Self>) {
         let thread_id = thread.id.clone();
         let updated_at = thread.updated_at;
+        let cwd = thread.cwd.to_string_lossy().into_owned();
         let chat = chat_entity_from_thread(thread, cx);
         let mut selected_chat_index = 0;
-        if let Some(project) = self.active_project_entity(cx) {
+        if let Some(project) = self.ensure_project_for_cwd(&cwd, cx) {
             selected_chat_index = project.update(cx, |project, cx| {
                 project.mark_thread_updated_at(updated_at);
                 let selected_chat_index = project
@@ -163,7 +164,25 @@ impl CodexGui {
     pub(super) fn apply_thread_resumed(&mut self, thread: Thread, cx: &mut Context<Self>) {
         let thread_id = thread.id.clone();
         let chat = chat_entity_from_thread(thread, cx);
-        if let Some(project) = self.active_project_entity(cx) {
+        if self
+            .state
+            .read(cx)
+            .projectless_chats
+            .iter()
+            .any(|chat| chat.read(cx).id == thread_id)
+        {
+            self.state.update(cx, |state, cx| {
+                let index = state
+                    .projectless_chats
+                    .iter()
+                    .position(|chat| chat.read(cx).id == thread_id);
+                match index {
+                    Some(index) => state.projectless_chats[index] = chat,
+                    None => state.projectless_chats.insert(0, chat),
+                }
+                cx.notify();
+            });
+        } else if let Some(project) = self.active_project_entity(cx) {
             let should_keep_selected = self
                 .active_chat_entity(cx)
                 .map(|chat| chat.read(cx).id == thread_id)
@@ -281,14 +300,40 @@ impl CodexGui {
     }
 
     pub(super) fn active_chat_entity(&self, cx: &mut Context<Self>) -> Option<Entity<ChatState>> {
-        let (project, active_chat) = {
-            let state = self.state.read(cx);
-            (state.active_project(), state.active_chat)
-        };
-        project.and_then(|project| {
-            let chats = project.read(cx).chats.clone();
-            chats.get(active_chat).cloned()
-        })
+        self.state.read(cx).active_chat_entity(cx)
+    }
+
+    fn ensure_project_for_cwd(
+        &self,
+        cwd: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ProjectState>> {
+        let existing = self
+            .state
+            .read(cx)
+            .projects
+            .iter()
+            .position(|project| project.read(cx).path.as_ref() == cwd);
+        if let Some(index) = existing {
+            return self.state.read(cx).projects.get(index).cloned();
+        }
+
+        let name = project_name_from_path(cwd);
+        let empty_chat = empty_chat_entity(cx);
+        let project = cx.new(|_| ProjectState::new(name.into(), cwd.into(), vec![empty_chat]));
+        self.state.update(cx, |state, cx| {
+            state.projects.push(project.clone());
+            state.sort_projects_by_recent_activity(cx);
+            let index = state
+                .projects
+                .iter()
+                .position(|candidate| candidate.read(cx).path.as_ref() == cwd)
+                .unwrap_or(0);
+            state.active_project = index;
+            state.active_projectless_chat = None;
+            cx.notify();
+        });
+        Some(project)
     }
 
     fn find_chat_entity(
@@ -296,7 +341,15 @@ impl CodexGui {
         thread_id: &str,
         cx: &mut Context<Self>,
     ) -> Option<Entity<ChatState>> {
-        let project = self.active_project_entity(cx)?;
+        let state = self.state.read(cx);
+        if let Some(chat) = state
+            .projectless_chats
+            .iter()
+            .find(|chat| chat.read(cx).id == thread_id)
+        {
+            return Some(chat.clone());
+        }
+        let project = state.active_project()?;
         let chats = project.read(cx).chats.clone();
         for chat in chats {
             let is_match = chat.read(cx).id == thread_id;
