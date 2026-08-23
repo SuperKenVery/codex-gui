@@ -7,49 +7,7 @@ use codex_app_server_protocol::{
 use gpui::{
     App, ClickEvent, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
 };
-use gpui_component::{
-    Icon, IconName, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    theme::Theme,
-    v_flex,
-};
-
-pub(super) fn chat_tree_item(
-    id: impl Into<gpui::ElementId>,
-    title: SharedString,
-    _subtitle: SharedString,
-    selected: bool,
-    theme: &Theme,
-) -> Button {
-    Button::new(id)
-        .ghost()
-        .with_size(px(0.))
-        .w_full()
-        .rounded_lg()
-        .child(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .gap_0p5()
-                .items_start()
-                .rounded_lg()
-                .py_1p5()
-                .pl_7()
-                .pr_2()
-                .when(selected, |this| this.bg(theme.sidebar_accent.opacity(0.38)))
-                .child(
-                    div()
-                        .w_full()
-                        .text_sm()
-                        .line_height(px(18.))
-                        .overflow_x_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(title),
-                ),
-        )
-}
+use gpui_component::{Icon, IconName, Sizable as _, h_flex, theme::Theme};
 
 pub(super) fn render_notice(body: &str, theme: &Theme) -> impl IntoElement {
     div()
