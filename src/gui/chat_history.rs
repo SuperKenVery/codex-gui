@@ -23,7 +23,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _,
     clipboard::Clipboard,
-    text::{MarkdownExtensions, TextView, TextViewState},
+    text::{MarkdownExtensions, TextView, TextViewState, TextViewStyle},
 };
 
 pub struct ChatHistory {
@@ -326,8 +326,11 @@ impl Render for ChatHistory {
                     .scrollable(true)
                     .size_full()
                     .min_w_0()
-                    .text_sm()
-                    .line_height(px(22.))
+                    .text_base()
+                    .line_height(px(30.))
+                    .style(TextViewStyle {
+                        ..Default::default()
+                    })
                     .text_color(cx.theme().foreground),
             )
             .into_any_element()
