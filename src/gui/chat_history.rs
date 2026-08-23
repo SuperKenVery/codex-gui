@@ -5,7 +5,6 @@ use std::{
 };
 
 use crate::gui::{
-    ChatState, GuiState, MessageState, StreamState,
     transcript::{
         TranscriptBlockStore, TranscriptBlockTarget, TranscriptDocument, TranscriptPlugin,
     },
@@ -13,16 +12,18 @@ use crate::gui::{
         render_assistant_header, render_notice, render_tool_group, render_user_message,
         render_worked_summary, tool_call_views, user_input_text,
     },
+    ChatState, GuiState, MessageState, StreamState,
 };
 use codex_app_server_protocol::ThreadItem;
 use codex_protocol::models::MessagePhase;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement,
-    Render, Styled, Subscription, WeakEntity, Window, div, prelude::*, px,
+    div, prelude::*, px, AnyElement, App, Context, Entity, EntityId, IntoElement, ParentElement,
+    Render, Styled, Subscription, WeakEntity, Window,
 };
 use gpui_component::{
-    ActiveTheme as _,
+    clipboard::Clipboard,
     text::{MarkdownExtensions, TextView, TextViewState},
+    ActiveTheme as _,
 };
 
 pub struct ChatHistory {
@@ -316,6 +317,11 @@ impl Render for ChatHistory {
             .child(
                 TextView::new(&self.transcript)
                     .markdown_extensions(self.transcript_extensions.clone())
+                    .code_block_actions(|code_block, _window, _cx| {
+                        Clipboard::new("copy-code-block")
+                            .value(code_block.code())
+                            .tooltip("Copy code")
+                    })
                     .selectable(true)
                     .scrollable(true)
                     .size_full()
