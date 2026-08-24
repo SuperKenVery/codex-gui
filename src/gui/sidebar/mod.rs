@@ -331,7 +331,7 @@ impl Render for Sidebar {
             .flex_col()
             .border_r_1()
             .border_color(cx.theme().border.opacity(0.35))
-            .bg(cx.theme().sidebar.opacity(0.28))
+            .bg(cx.theme().sidebar.opacity(0.5))
             .text_color(cx.theme().sidebar_foreground)
             .px_3()
             .pb_4()
