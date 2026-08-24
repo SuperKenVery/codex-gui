@@ -34,6 +34,9 @@ impl CodexGui {
                     self.update_chat_title(&params.thread_id, thread_name, cx);
                 }
             }
+            ServerNotification::ThreadDeleted(params) => {
+                self.remove_thread_from_ui(&params.thread_id, cx);
+            }
             ServerNotification::TurnStarted(params) => {
                 tracing::info!(
                     thread_id = %params.thread_id,
@@ -96,7 +99,7 @@ impl CodexGui {
                 let turn = params.turn;
                 let thread_id = params.thread_id;
                 let turn_id = turn.id.clone();
-                self.upsert_thread_turn(&thread_id, turn, cx);
+                self.complete_thread_turn(&thread_id, turn, cx);
                 self.ui_state.update(cx, |state, cx| {
                     state.finish_turn(&thread_id, &turn_id);
                     cx.notify();
@@ -149,6 +152,121 @@ impl CodexGui {
             })
             .detach();
         }
+    }
+
+    pub(super) fn replace_thread_in_ui(
+        &mut self,
+        source_thread_id: &str,
+        replacement: Thread,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let replacement_thread_id = replacement.id.clone();
+        let updated_at = replacement.updated_at;
+        let replacement_chat = chat_entity_from_thread(replacement, cx);
+
+        let projectless_index = self
+            .state
+            .read(cx)
+            .projectless_chats
+            .iter()
+            .position(|chat| chat.read(cx).id == source_thread_id);
+        if let Some(index) = projectless_index {
+            self.state.update(cx, |state, cx| {
+                state.projectless_chats[index] = replacement_chat;
+                state.select_projectless_chat(index);
+                cx.notify();
+            });
+        } else {
+            let location = self.state.read(cx).projects.iter().enumerate().find_map(
+                |(project_index, project)| {
+                    project
+                        .read(cx)
+                        .chats
+                        .iter()
+                        .position(|chat| chat.read(cx).id == source_thread_id)
+                        .map(|chat_index| (project_index, chat_index, project.clone()))
+                },
+            );
+            let Some((project_index, chat_index, project)) = location else {
+                tracing::warn!(
+                    source_thread_id,
+                    replacement_thread_id,
+                    "source thread missing while applying edited replacement"
+                );
+                return false;
+            };
+            project.update(cx, |project, cx| {
+                project.chats[chat_index] = replacement_chat;
+                project.mark_thread_updated_at(updated_at);
+                cx.notify();
+            });
+            self.state.update(cx, |state, cx| {
+                state.active_project = project_index;
+                state.select_chat(chat_index);
+                cx.notify();
+            });
+        }
+
+        self.ui_state.update(cx, |state, cx| {
+            state.close_new_chat();
+            cx.notify();
+        });
+        tracing::info!(
+            source_thread_id,
+            thread_id = replacement_thread_id,
+            "thread replaced in UI"
+        );
+        true
+    }
+
+    pub(super) fn remove_thread_from_ui(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        let active_thread_id = self
+            .active_chat_entity(cx)
+            .map(|chat| chat.read(cx).id.clone());
+        let projects = self.state.read(cx).projects.clone();
+        for project in projects {
+            project.update(cx, |project, cx| {
+                let old_len = project.chats.len();
+                project.chats.retain(|chat| chat.read(cx).id != thread_id);
+                if project.chats.len() != old_len {
+                    cx.notify();
+                }
+            });
+        }
+
+        self.state.update(cx, |state, cx| {
+            state
+                .projectless_chats
+                .retain(|chat| chat.read(cx).id != thread_id);
+            if let Some(active_thread_id) = active_thread_id {
+                if let Some(index) = state
+                    .projectless_chats
+                    .iter()
+                    .position(|chat| chat.read(cx).id == active_thread_id)
+                {
+                    state.select_projectless_chat(index);
+                } else if let Some((project_index, chat_index)) = state
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .find_map(|(project_index, project)| {
+                        project
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .position(|chat| chat.read(cx).id == active_thread_id)
+                            .map(|chat_index| (project_index, chat_index))
+                    })
+                {
+                    state.active_project = project_index;
+                    state.select_chat(chat_index);
+                } else {
+                    state.select_first_chat();
+                }
+            }
+            cx.notify();
+        });
+        tracing::info!(thread_id, "removed deleted thread from UI");
     }
 
     pub(super) fn apply_thread_resumed(&mut self, thread: Thread, cx: &mut Context<Self>) {
@@ -319,6 +437,21 @@ impl CodexGui {
         };
         chat.update(cx, |chat, cx| {
             chat.upsert_turn(turn);
+            cx.notify();
+        });
+    }
+
+    fn complete_thread_turn(
+        &self,
+        thread_id: &str,
+        turn: codex_app_server_protocol::Turn,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
+            return;
+        };
+        chat.update(cx, |chat, cx| {
+            chat.complete_turn(turn);
             cx.notify();
         });
     }

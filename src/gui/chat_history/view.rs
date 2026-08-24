@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
-    prelude::*, px,
+    Context, Entity, EventEmitter, FollowMode, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _,
@@ -16,9 +16,10 @@ use gpui_component::{
 use crate::gui::{ChatState, GuiState, widgets::render_notice};
 
 use super::{
+    blocks::BlockId,
     math::MathPlugin,
     projection::build_transcript,
-    transcript::{TranscriptBlockStore, TranscriptPlugin, TranscriptSnapshot},
+    transcript::{TranscriptBlockStore, TranscriptPlugin, TranscriptSnapshot, node_has_id},
 };
 
 pub struct ChatHistory {
@@ -35,6 +36,18 @@ pub struct ChatHistory {
     transcript_chat_id: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) enum ChatHistoryEvent {
+    EditUserMessage {
+        turn_id: String,
+        previous_turn_id: Option<String>,
+        body: String,
+    },
+    ForkUserMessage {
+        turn_id: String,
+    },
+}
+
 impl ChatHistory {
     pub fn new(state: Entity<GuiState>, cx: &mut Context<Self>) -> Self {
         let active_chat = active_chat_entity(&state, cx);
@@ -43,7 +56,7 @@ impl ChatHistory {
             history.update_active_chat_subscription(cx);
             cx.notify();
         });
-        let transcript = cx.new(|cx| TextViewState::markdown("", cx));
+        let transcript = new_transcript(cx);
         let transcript_blocks = Arc::new(RwLock::new(Default::default()));
         let transcript_extensions =
             TranscriptPlugin::new(cx.entity().downgrade(), transcript_blocks.clone())
@@ -77,7 +90,7 @@ impl ChatHistory {
         self.active_chat = active_chat;
         self.expanded_turns.clear();
         self.expanded_tool_groups.clear();
-        self.transcript = cx.new(|cx| TextViewState::markdown("", cx));
+        self.transcript = new_transcript(cx);
         self.transcript_markdown.clear();
         self.transcript_chat_id = None;
         self.rebuild_transcript(cx);
@@ -95,13 +108,39 @@ impl ChatHistory {
         if !self.expanded_tool_groups.remove(group_id) {
             self.expanded_tool_groups.insert(group_id.to_string());
         }
-        self.rebuild_transcript(cx);
+        self.rebuild_transcript_remeasuring(Some(BlockId::tool_group(group_id)), cx);
         cx.notify();
     }
 
+    pub(super) fn edit_user_message(
+        &mut self,
+        turn_id: String,
+        previous_turn_id: Option<String>,
+        body: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(ChatHistoryEvent::EditUserMessage {
+            turn_id,
+            previous_turn_id,
+            body,
+        });
+    }
+
+    pub(super) fn fork_user_message(&mut self, turn_id: String, cx: &mut Context<Self>) {
+        cx.emit(ChatHistoryEvent::ForkUserMessage { turn_id });
+    }
+
     fn rebuild_transcript(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_transcript_remeasuring(None, cx);
+    }
+
+    fn rebuild_transcript_remeasuring(
+        &mut self,
+        changed_block: Option<BlockId>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat) = self.active_chat.as_ref() else {
-            self.sync_transcript(None, TranscriptSnapshot::new(), cx);
+            self.sync_transcript(None, TranscriptSnapshot::new(), changed_block, cx);
             return;
         };
         let chat_id = chat.read(cx).id.clone();
@@ -110,13 +149,14 @@ impl ChatHistory {
             &self.expanded_turns,
             &self.expanded_tool_groups,
         );
-        self.sync_transcript(Some(chat_id), snapshot, cx);
+        self.sync_transcript(Some(chat_id), snapshot, changed_block, cx);
     }
 
     fn sync_transcript(
         &mut self,
         chat_id: Option<String>,
         snapshot: TranscriptSnapshot,
+        changed_block: Option<BlockId>,
         cx: &mut Context<Self>,
     ) {
         if let Ok(mut blocks) = self.transcript_blocks.write() {
@@ -128,6 +168,17 @@ impl ChatHistory {
         self.transcript_chat_id = chat_id;
 
         if same_chat && old_markdown == self.transcript_markdown {
+            // Plugin-backed blocks can change height without changing their stable
+            // Markdown marker. Invalidate their cached measurements without resetting
+            // ListState, so expanding a tool group keeps the current viewport.
+            self.transcript.update(cx, |state, cx| {
+                let remeasured = changed_block.as_ref().is_some_and(|id| {
+                    state.remeasure_custom_block(|node| node_has_id(node, id), cx)
+                });
+                if !remeasured {
+                    state.remeasure_content(cx);
+                }
+            });
             return;
         }
 
@@ -147,6 +198,16 @@ impl ChatHistory {
             }
         });
     }
+}
+
+impl EventEmitter<ChatHistoryEvent> for ChatHistory {}
+
+fn new_transcript(cx: &mut Context<ChatHistory>) -> Entity<TextViewState> {
+    cx.new(|cx| {
+        let mut state = TextViewState::markdown("", cx);
+        state.set_follow_mode(FollowMode::Tail, cx);
+        state
+    })
 }
 
 impl Render for ChatHistory {

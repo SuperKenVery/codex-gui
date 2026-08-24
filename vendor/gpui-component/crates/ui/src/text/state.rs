@@ -2,9 +2,9 @@ use futures::Stream as _;
 use std::{ops::RangeInclusive, pin::Pin, sync::Arc, task::Poll};
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, DefiniteLength, FocusHandle, IntoElement, KeyBinding,
-    ListState, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Task, Window,
-    prelude::FluentBuilder as _, px,
+    App, AppContext as _, Bounds, Context, DefiniteLength, FocusHandle, FollowMode, IntoElement,
+    KeyBinding, ListState, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
+    Task, Window, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -250,6 +250,49 @@ impl TextViewState {
         }
         self.scrollable = scrollable;
         cx.notify();
+    }
+
+    /// Set how a scrollable text view follows content added at its end.
+    pub fn set_follow_mode(&mut self, mode: FollowMode, cx: &mut Context<Self>) {
+        self.list_state.set_follow_mode(mode);
+        cx.notify();
+    }
+
+    /// Invalidate cached block measurements while preserving the logical viewport.
+    ///
+    /// Call this after changing data rendered by a Markdown plugin without changing
+    /// the Markdown source itself.
+    pub fn remeasure_content(&mut self, cx: &mut Context<Self>) {
+        self.list_state
+            .remeasure_items(0..self.list_state.item_count());
+        cx.notify();
+    }
+
+    /// Invalidate one top-level custom Markdown block while preserving the logical viewport.
+    ///
+    /// Returns whether a matching parsed block was found. The predicate can inspect
+    /// the typed data stored in [`crate::text::MarkdownNode`].
+    pub fn remeasure_custom_block(
+        &mut self,
+        mut predicate: impl FnMut(&crate::text::MarkdownNode) -> bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(ix) = self
+            .parsed_content
+            .document
+            .blocks
+            .iter()
+            .position(|block| match block {
+                node::BlockNode::Custom(node) => predicate(node),
+                _ => false,
+            })
+        else {
+            return false;
+        };
+
+        self.list_state.remeasure_items(ix..ix + 1);
+        cx.notify();
+        true
     }
 
     /// Set the text content.

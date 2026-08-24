@@ -31,6 +31,10 @@ impl BlockId {
     pub fn from_marker(value: String) -> Self {
         Self(value)
     }
+
+    pub fn tool_group(key: &str) -> Self {
+        Self::new("tools", key)
+    }
 }
 
 impl fmt::Display for BlockId {
@@ -43,6 +47,8 @@ impl fmt::Display for BlockId {
 pub(super) enum HistoryBlock {
     User {
         key: String,
+        turn_id: String,
+        previous_turn_id: Option<String>,
         body: SharedString,
     },
     AssistantHeader {
@@ -68,7 +74,7 @@ impl HistoryBlock {
         match self {
             Self::User { key, .. } => BlockId::new("user", key),
             Self::AssistantHeader { key, .. } => BlockId::new("assistant-header", key),
-            Self::ToolGroup { key, .. } => BlockId::new("tools", key),
+            Self::ToolGroup { key, .. } => BlockId::tool_group(key),
             Self::WorkedSummary { turn_id, .. } => BlockId::new("worked-summary", turn_id),
         }
     }
@@ -81,8 +87,37 @@ pub(super) fn render(
     cx: &mut App,
 ) -> AnyElement {
     match block {
-        HistoryBlock::User { body, .. } => {
-            messages::render_user(body, cx.theme()).into_any_element()
+        HistoryBlock::User {
+            key,
+            turn_id,
+            previous_turn_id,
+            body,
+        } => {
+            let edit_history = history.clone();
+            let edit_turn_id = turn_id.clone();
+            let edit_body = body.clone();
+            let fork_history = history.clone();
+            messages::render_user(
+                &key,
+                body,
+                cx.theme(),
+                move |_, _, cx| {
+                    cx.stop_propagation();
+                    let turn_id = edit_turn_id.clone();
+                    let previous_turn_id = previous_turn_id.clone();
+                    let body = edit_body.to_string();
+                    let _ = edit_history.update(cx, |history, cx| {
+                        history.edit_user_message(turn_id, previous_turn_id, body, cx)
+                    });
+                },
+                move |_, _, cx| {
+                    cx.stop_propagation();
+                    let turn_id = turn_id.clone();
+                    let _ = fork_history
+                        .update(cx, |history, cx| history.fork_user_message(turn_id, cx));
+                },
+            )
+            .into_any_element()
         }
         HistoryBlock::AssistantHeader { label, .. } => {
             messages::render_assistant_header(label, cx.theme()).into_any_element()

@@ -106,9 +106,14 @@ Block IDs must depend only on semantic identity, never dynamic presentation stat
 Transcript synchronization follows these rules:
 
 - replace the block store on every projection;
-- do nothing to `TextViewState` when Markdown is unchanged;
+- when Markdown is unchanged, do not replace its text; after changing plugin-backed block data,
+  call `TextViewState::remeasure_custom_block` when the changed block identity is known so only
+  that row's cached height is invalidated without resetting the logical viewport; use
+  `remeasure_content` only when the changed block cannot be identified;
 - use `push_str` when the new Markdown is a strict append to the same chat;
 - use `set_text` for chat switches, folding changes, or any earlier-content change.
+- Configure transcript `TextViewState` with `FollowMode::Tail`. Tail following keeps streaming output
+  visible, disengages when the user scrolls upward, and re-engages when they return to the end.
 
 ## GPUI state and event conventions
 

@@ -10,11 +10,12 @@ use codex_app_server_client::{
 use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, ClientRequest, ConfigWarningNotification, JSONRPCErrorError,
     ModelListParams, ModelListResponse, PermissionProfileListParams, PermissionProfileListResponse,
-    RequestId, ServerNotification, SortDirection, Thread, ThreadForkParams, ThreadForkResponse,
-    ThreadListParams, ThreadListResponse, ThreadResumeParams, ThreadResumeResponse,
-    ThreadSettingsUpdateParams, ThreadSettingsUpdateResponse, ThreadSortKey, ThreadSource,
-    ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse,
-    TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse, UserInput,
+    RequestId, ServerNotification, SortDirection, Thread, ThreadDeleteParams, ThreadDeleteResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadListParams, ThreadListResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSettingsUpdateParams, ThreadSettingsUpdateResponse, ThreadSortKey,
+    ThreadSource, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    UserInput,
 };
 use codex_arg0::Arg0DispatchPaths;
 use codex_protocol::{openai_models::ReasoningEffort, protocol::SessionSource};
@@ -23,7 +24,7 @@ use std::{
     fmt,
     sync::{
         Arc,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicUsize, Ordering},
     },
 };
 use tokio::{
@@ -40,6 +41,18 @@ struct BridgeInner {
     client_state: watch::Receiver<ClientState>,
     shutdown_tx: watch::Sender<bool>,
     next_request_id: AtomicI64,
+    muted_thread_notifications: Arc<AtomicUsize>,
+}
+
+pub struct ThreadNotificationMute {
+    muted_thread_notifications: Arc<AtomicUsize>,
+}
+
+impl Drop for ThreadNotificationMute {
+    fn drop(&mut self) {
+        self.muted_thread_notifications
+            .fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Drop for BridgeInner {
@@ -90,12 +103,14 @@ pub fn start_app_server_bridge(
     let (client_state_tx, client_state_rx) = watch::channel(ClientState::Starting);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let muted_thread_notifications = Arc::new(AtomicUsize::new(0));
 
     runtime.spawn(run_embedded_app_server(
         arg0_paths,
         client_state_tx,
         shutdown_rx,
         event_tx,
+        muted_thread_notifications.clone(),
     ));
 
     (
@@ -104,6 +119,7 @@ pub fn start_app_server_bridge(
                 client_state: client_state_rx,
                 shutdown_tx,
                 next_request_id: AtomicI64::new(1),
+                muted_thread_notifications,
             }),
         },
         event_rx,
@@ -111,6 +127,15 @@ pub fn start_app_server_bridge(
 }
 
 impl AppServerBridge {
+    pub fn mute_thread_notifications(&self) -> ThreadNotificationMute {
+        self.inner
+            .muted_thread_notifications
+            .fetch_add(1, Ordering::Relaxed);
+        ThreadNotificationMute {
+            muted_thread_notifications: self.inner.muted_thread_notifications.clone(),
+        }
+    }
+
     pub async fn wait_until_ready(&self) -> BridgeResult<()> {
         self.request_handle().await.map(|_| ())
     }
@@ -250,17 +275,34 @@ impl AppServerBridge {
         Ok(response.thread)
     }
 
-    pub async fn fork_thread(&self, thread_id: String) -> BridgeResult<Thread> {
+    pub async fn fork_thread(
+        &self,
+        thread_id: String,
+        last_turn_id: Option<String>,
+        before_turn_id: Option<String>,
+    ) -> BridgeResult<Thread> {
         let response: ThreadForkResponse = self
             .request(|request_id| ClientRequest::ThreadFork {
                 request_id,
                 params: ThreadForkParams {
                     thread_id,
+                    last_turn_id,
+                    before_turn_id,
                     ..Default::default()
                 },
             })
             .await?;
         Ok(response.thread)
+    }
+
+    pub async fn delete_thread(&self, thread_id: String) -> BridgeResult<()> {
+        let _: ThreadDeleteResponse = self
+            .request(|request_id| ClientRequest::ThreadDelete {
+                request_id,
+                params: ThreadDeleteParams { thread_id },
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn send_turn(
@@ -403,6 +445,7 @@ async fn run_embedded_app_server(
     client_state: watch::Sender<ClientState>,
     mut shutdown: watch::Receiver<bool>,
     events: mpsc::UnboundedSender<BridgeEvent>,
+    muted_thread_notifications: Arc<AtomicUsize>,
 ) {
     let mut client = match build_embedded_client(arg0_paths).await {
         Ok(client) => client,
@@ -431,7 +474,16 @@ async fn run_embedded_app_server(
                 };
                 match event {
                     InProcessServerEvent::ServerNotification(notification) => {
-                        let _ = events.send(BridgeEvent::Notification(*notification));
+                        let notification = *notification;
+                        let muted = muted_thread_notifications.load(Ordering::Relaxed) > 0
+                            && matches!(
+                                &notification,
+                                ServerNotification::ThreadStarted(_)
+                                    | ServerNotification::ThreadDeleted(_)
+                            );
+                        if !muted {
+                            let _ = events.send(BridgeEvent::Notification(notification));
+                        }
                     }
                     InProcessServerEvent::ServerRequest(request) => {
                         let message = format!("unsupported app-server request: {request:?}");
@@ -515,7 +567,7 @@ async fn build_embedded_client(
         state_db,
         environment_manager: Arc::new(environment_manager),
         config_warnings,
-        session_source: SessionSource::Custom("codex-gui".into()),
+        session_source: SessionSource::VSCode,
         enable_codex_api_key_env: true,
         client_name: "codex-gui".into(),
         client_version: env!("CARGO_PKG_VERSION").into(),

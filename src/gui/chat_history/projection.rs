@@ -18,14 +18,17 @@ pub(super) fn build_transcript(
     let mut transcript = TranscriptSnapshot::new();
 
     if let Some(thread) = &chat.thread {
+        let mut previous_turn_id = None;
         for turn in &thread.turns {
             append_turn(
                 &mut transcript,
                 chat,
                 turn,
+                previous_turn_id.as_deref(),
                 expanded_turns,
                 expanded_tool_groups,
             );
+            previous_turn_id = Some(turn.id.as_str());
         }
     }
 
@@ -40,17 +43,27 @@ fn append_turn(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
     turn: &Turn,
+    previous_turn_id: Option<&str>,
     expanded_turns: &HashSet<String>,
     expanded_tool_groups: &HashSet<String>,
 ) {
     let Some(fold) = completed_turn_fold(turn) else {
-        append_items(transcript, chat, &turn.items, expanded_tool_groups);
+        append_items(
+            transcript,
+            chat,
+            &turn.id,
+            previous_turn_id,
+            &turn.items,
+            expanded_tool_groups,
+        );
         return;
     };
 
     append_items(
         transcript,
         chat,
+        &turn.id,
+        previous_turn_id,
         &turn.items[..=fold.user_index],
         expanded_tool_groups,
     );
@@ -66,6 +79,8 @@ fn append_turn(
         append_items(
             transcript,
             chat,
+            &turn.id,
+            previous_turn_id,
             &turn.items[fold.user_index + 1..],
             expanded_tool_groups,
         );
@@ -84,6 +99,8 @@ fn append_turn(
 fn append_items(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
+    turn_id: &str,
+    previous_turn_id: Option<&str>,
     items: &[ThreadItem],
     expanded_tool_groups: &HashSet<String>,
 ) {
@@ -95,6 +112,8 @@ fn append_items(
                 if !body.is_empty() {
                     transcript.push_block(HistoryBlock::User {
                         key: id.clone(),
+                        turn_id: turn_id.to_string(),
+                        previous_turn_id: previous_turn_id.map(str::to_string),
                         body: body.into(),
                     });
                 }

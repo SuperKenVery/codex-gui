@@ -110,18 +110,88 @@ impl CodexGui {
         }
     }
 
-    pub(crate) fn fork_chat(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn fork_chat_through(&mut self, turn_id: String, cx: &mut Context<Self>) {
         let Some(thread_id) = self
             .active_chat_entity(cx)
             .map(|chat| chat.read(cx).id.clone())
         else {
             return;
         };
-        tracing::info!(thread_id, "forking thread");
+        tracing::info!(thread_id, turn_id, "forking thread through turn");
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = bridge.fork_thread(thread_id).await;
+            let result = bridge.fork_thread(thread_id, Some(turn_id), None).await;
             let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
+        })
+        .detach();
+    }
+
+    pub(crate) fn submit_edited_turn_text(
+        &mut self,
+        source_thread_id: String,
+        turn_id: String,
+        previous_turn_id: Option<String>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ui_state.read(cx).active_turn.is_some() {
+            return;
+        }
+        let is_source_active = self
+            .active_chat_entity(cx)
+            .is_some_and(|chat| chat.read(cx).id == source_thread_id);
+        if !is_source_active {
+            return;
+        }
+
+        tracing::info!(
+            thread_id = source_thread_id,
+            last_turn_id = previous_turn_id,
+            "replacing thread for edited message"
+        );
+        let settings = self.state.read(cx).chat_settings.clone();
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let _notification_mute = bridge.mute_thread_notifications();
+            let before_turn_id = previous_turn_id.is_none().then_some(turn_id);
+            let forked_thread = match bridge
+                .fork_thread(source_thread_id.clone(), previous_turn_id, before_turn_id)
+                .await
+            {
+                Ok(thread) => thread,
+                Err(err) => {
+                    let _ =
+                        this.update(cx, |view, cx| view.apply_bridge_error(err.to_string(), cx));
+                    return;
+                }
+            };
+            let replacement_thread_id = forked_thread.id.clone();
+            let replaced = this
+                .update(cx, |view, cx| {
+                    view.replace_thread_in_ui(&source_thread_id, forked_thread, cx)
+                })
+                .unwrap_or(false);
+            if !replaced {
+                return;
+            }
+
+            match bridge.delete_thread(source_thread_id.clone()).await {
+                Ok(()) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.remove_thread_from_ui(&source_thread_id, cx)
+                    });
+                }
+                Err(err) => {
+                    let _ =
+                        this.update(cx, |view, cx| view.apply_bridge_error(err.to_string(), cx));
+                }
+            }
+
+            let result = bridge
+                .send_turn(replacement_thread_id, text, settings)
+                .await
+                .map(|_| ());
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
         })
         .detach();
     }

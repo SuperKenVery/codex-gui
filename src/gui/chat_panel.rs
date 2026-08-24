@@ -1,5 +1,5 @@
 use crate::app::CodexGui;
-use crate::gui::{ApprovalReviewerMode, ChatHistory, GuiState, UiState};
+use crate::gui::{ApprovalReviewerMode, ChatHistory, ChatHistoryEvent, GuiState, UiState};
 use gpui::{
     Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
     WeakEntity, Window, WindowControlArea, div, prelude::*, px,
@@ -18,9 +18,16 @@ pub struct ChatPanel {
     ui_state: Entity<UiState>,
     history: Entity<ChatHistory>,
     composer_input: Entity<TextareaState>,
+    editing_message: Option<EditingMessage>,
     project_path_input: Entity<InputState>,
     should_move_window: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+struct EditingMessage {
+    source_thread_id: String,
+    turn_id: String,
+    previous_turn_id: Option<String>,
 }
 
 impl ChatPanel {
@@ -31,13 +38,13 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let history = cx.new(|cx| ChatHistory::new(state.clone(), cx));
         let composer_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 5)
                 .submit_on_enter(true)
                 .placeholder("Do anything")
         });
+        let history = cx.new(|cx| ChatHistory::new(state.clone(), cx));
         let project_path_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .submit_on_enter(true)
@@ -48,11 +55,27 @@ impl ChatPanel {
             cx.observe(&ui_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&composer_input, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    if view.active_chat_turn_running(cx) {
+                    if view.active_chat_turn_running(cx) && view.editing_message.is_none() {
                         view.steer_composer_turn(window, cx);
                     } else {
                         view.send_composer_turn(window, cx);
                     }
+                }
+            }),
+            cx.subscribe_in(&history, window, |view, _, event, window, cx| match event {
+                ChatHistoryEvent::EditUserMessage {
+                    turn_id,
+                    previous_turn_id,
+                    body,
+                } => view.begin_editing_message(
+                    turn_id.clone(),
+                    previous_turn_id.clone(),
+                    body,
+                    window,
+                    cx,
+                ),
+                ChatHistoryEvent::ForkUserMessage { turn_id } => {
+                    view.fork_chat_through(turn_id.clone(), cx)
                 }
             }),
             cx.subscribe_in(&project_path_input, window, |view, _, event, window, cx| {
@@ -68,6 +91,7 @@ impl ChatPanel {
             ui_state,
             history,
             composer_input,
+            editing_message: None,
             project_path_input,
             should_move_window: false,
             _subscriptions: subscriptions,
@@ -85,9 +109,52 @@ impl ChatPanel {
         if text.is_empty() {
             return;
         }
+        let editing_message = self.editing_message.take();
         let parent = self.parent.clone();
         cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.submit_turn_text(text, cx));
+            let _ = parent.update(cx, |parent, cx| {
+                if let Some(editing_message) = editing_message {
+                    parent.submit_edited_turn_text(
+                        editing_message.source_thread_id,
+                        editing_message.turn_id,
+                        editing_message.previous_turn_id,
+                        text,
+                        cx,
+                    );
+                } else {
+                    parent.submit_turn_text(text, cx);
+                }
+            });
+        });
+    }
+
+    fn begin_editing_message(
+        &mut self,
+        turn_id: String,
+        previous_turn_id: Option<String>,
+        body: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_chat_turn_running(cx) {
+            return;
+        }
+        let Some(source_thread_id) = self
+            .state
+            .read(cx)
+            .active_chat_entity(cx)
+            .map(|chat| chat.read(cx).id.clone())
+        else {
+            return;
+        };
+        self.editing_message = Some(EditingMessage {
+            source_thread_id,
+            turn_id,
+            previous_turn_id,
+        });
+        self.composer_input.update(cx, |input, cx| {
+            input.set_value(body, window, cx);
+            input.focus(window, cx);
         });
     }
 
@@ -131,10 +198,10 @@ impl ChatPanel {
             .is_some_and(|active_turn| active_turn.thread_id == active_thread_id)
     }
 
-    fn fork_chat(&mut self, cx: &mut Context<Self>) {
+    fn fork_chat_through(&mut self, turn_id: String, cx: &mut Context<Self>) {
         let parent = self.parent.clone();
         cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.fork_chat(cx));
+            let _ = parent.update(cx, |parent, cx| parent.fork_chat_through(turn_id, cx));
         });
     }
 
@@ -622,16 +689,6 @@ impl Render for ChatPanel {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
-                                    .child(
-                                        Button::new("fork-chat")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Copy)
-                                            .tooltip("Fork chat")
-                                            .on_click(
-                                                cx.listener(|view, _, _, cx| view.fork_chat(cx)),
-                                            ),
-                                    )
                                     .child(
                                         Button::new("toggle-side-chat")
                                             .small()

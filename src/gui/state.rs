@@ -419,6 +419,39 @@ impl ChatState {
         self.rebuild_item_locations();
     }
 
+    pub fn complete_turn(&mut self, completed: Turn) {
+        let completed_id = completed.id.clone();
+        let item_ids = {
+            let Some(thread) = &mut self.thread else {
+                return;
+            };
+            if let Some(existing) = thread
+                .turns
+                .iter_mut()
+                .find(|existing| existing.id == completed_id)
+            {
+                apply_turn_completion(existing, completed);
+                existing
+                    .items
+                    .iter()
+                    .map(|item| item.id().to_string())
+                    .collect::<Vec<_>>()
+            } else {
+                let item_ids = completed
+                    .items
+                    .iter()
+                    .map(|item| item.id().to_string())
+                    .collect::<Vec<_>>();
+                thread.turns.push(completed);
+                item_ids
+            }
+        };
+        for item_id in item_ids {
+            self.message_states.remove(&item_id);
+        }
+        self.rebuild_item_locations();
+    }
+
     pub fn start_item(&mut self, turn_id: &str, item: ThreadItem) {
         let item_id = item.id().to_string();
         self.message_states
@@ -601,6 +634,25 @@ fn thread_item_locations(thread: &Thread) -> HashMap<String, ThreadItemLocation>
     locations
 }
 
+fn apply_turn_completion(existing: &mut Turn, completed: Turn) {
+    for item in completed.items {
+        if let Some(existing_item) = existing
+            .items
+            .iter_mut()
+            .find(|existing_item| existing_item.id() == item.id())
+        {
+            *existing_item = item;
+        } else {
+            existing.items.push(item);
+        }
+    }
+    existing.status = completed.status;
+    existing.error = completed.error;
+    existing.started_at = completed.started_at;
+    existing.completed_at = completed.completed_at;
+    existing.duration_ms = completed.duration_ms;
+}
+
 pub struct UiState {
     pub side_chat_open: bool,
     pub new_chat_open: bool,
@@ -649,4 +701,81 @@ impl UiState {
 pub struct ActiveTurn {
     pub thread_id: String,
     pub turn_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::{TurnItemsView, UserInput};
+
+    #[test]
+    fn turn_completion_preserves_live_items_and_updates_metadata() {
+        let mut live_turn = Turn {
+            id: "turn-1".into(),
+            items: vec![
+                ThreadItem::UserMessage {
+                    id: "user-1".into(),
+                    client_id: None,
+                    content: vec![UserInput::Text {
+                        text: "hello".into(),
+                        text_elements: Vec::new(),
+                    }],
+                },
+                ThreadItem::AgentMessage {
+                    id: "progress-1".into(),
+                    text: "working".into(),
+                    phase: None,
+                    memory_citation: None,
+                },
+                ThreadItem::AgentMessage {
+                    id: "agent-1".into(),
+                    text: "streamed response".into(),
+                    phase: None,
+                    memory_citation: None,
+                },
+            ],
+            items_view: TurnItemsView::NotLoaded,
+            status: TurnStatus::InProgress,
+            error: None,
+            started_at: Some(10),
+            completed_at: None,
+            duration_ms: None,
+        };
+        let completed_turn = Turn {
+            id: "turn-1".into(),
+            items: vec![ThreadItem::AgentMessage {
+                id: "agent-1".into(),
+                text: "canonical response".into(),
+                phase: None,
+                memory_citation: None,
+            }],
+            items_view: TurnItemsView::Summary,
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: Some(10),
+            completed_at: Some(12),
+            duration_ms: Some(2_000),
+        };
+
+        apply_turn_completion(&mut live_turn, completed_turn);
+
+        assert_eq!(live_turn.items.len(), 3);
+        assert!(matches!(
+            &live_turn.items[0],
+            ThreadItem::UserMessage { id, .. } if id == "user-1"
+        ));
+        assert!(matches!(
+            &live_turn.items[1],
+            ThreadItem::AgentMessage { id, .. } if id == "progress-1"
+        ));
+        assert!(matches!(
+            &live_turn.items[2],
+            ThreadItem::AgentMessage { id, text, .. }
+                if id == "agent-1" && text == "canonical response"
+        ));
+        assert_eq!(live_turn.items_view, TurnItemsView::NotLoaded);
+        assert_eq!(live_turn.status, TurnStatus::Completed);
+        assert_eq!(live_turn.completed_at, Some(12));
+        assert_eq!(live_turn.duration_ms, Some(2_000));
+    }
 }

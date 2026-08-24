@@ -5,3 +5,4 @@ mod transcript;
 mod view;
 
 pub use view::ChatHistory;
+pub(crate) use view::ChatHistoryEvent;

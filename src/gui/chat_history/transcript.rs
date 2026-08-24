@@ -74,6 +74,11 @@ struct TranscriptNode {
     id: BlockId,
 }
 
+pub(super) fn node_has_id(node: &MarkdownNode, id: &BlockId) -> bool {
+    node.data::<TranscriptNode>()
+        .is_some_and(|node| node.id == *id)
+}
+
 impl MarkdownPlugin for TranscriptPlugin {
     fn is_block(&self) -> bool {
         true
@@ -145,6 +150,8 @@ mod tests {
         let mut before = TranscriptSnapshot::new();
         before.push_block(HistoryBlock::User {
             key: "user-1".into(),
+            turn_id: "turn-1".into(),
+            previous_turn_id: None,
             body: "hello".into(),
         });
         before.push_markdown("A partial reply");
@@ -152,6 +159,8 @@ mod tests {
         let mut after = TranscriptSnapshot::new();
         after.push_block(HistoryBlock::User {
             key: "user-1".into(),
+            turn_id: "turn-1".into(),
+            previous_turn_id: None,
             body: "hello".into(),
         });
         after.push_markdown("A partial reply with another chunk");
