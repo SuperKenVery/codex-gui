@@ -351,9 +351,6 @@ impl Element for TextView {
         let mut el = div()
             .key_context("TextView")
             .track_focus(&focus_handle)
-            .when(self.scrollable, |this| {
-                this.size_full().vertical_scrollbar(&list_state)
-            })
             .relative()
             .on_action(move |_: &crate::input::Copy, window, cx| {
                 let text = gpui_base::TextSelection::selected_text(window, cx)
@@ -367,6 +364,9 @@ impl Element for TextView {
             })
             .on_action(window.listener_for(&state, TextViewState::on_action_select_all))
             .child(state.clone())
+            .when(self.scrollable, |this| {
+                this.size_full().vertical_scrollbar(&list_state)
+            })
             .refine_style(&self.style)
             .into_any_element();
         let layout_id = el.request_layout(window, cx);
