@@ -17,6 +17,13 @@ use gpui_component::ActiveTheme as _;
 use super::view::ChatHistory;
 pub(super) use tools::{ToolCallView, is_tool_item, tool_call_views, tools_done};
 
+#[derive(Clone)]
+pub(super) enum UserMessageDelivery {
+    Sent,
+    Sending,
+    Failed,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BlockId(String);
 
@@ -47,9 +54,10 @@ impl fmt::Display for BlockId {
 pub(super) enum HistoryBlock {
     User {
         key: String,
-        turn_id: String,
+        turn_id: Option<String>,
         previous_turn_id: Option<String>,
         body: SharedString,
+        delivery: UserMessageDelivery,
     },
     AssistantHeader {
         key: String,
@@ -92,18 +100,24 @@ pub(super) fn render(
             turn_id,
             previous_turn_id,
             body,
+            delivery,
         } => {
             let edit_history = history.clone();
             let edit_turn_id = turn_id.clone();
             let edit_body = body.clone();
             let fork_history = history.clone();
+            let actions_available = turn_id.is_some();
             messages::render_user(
                 &key,
                 body,
+                delivery,
+                actions_available,
                 cx.theme(),
                 move |_, _, cx| {
                     cx.stop_propagation();
-                    let turn_id = edit_turn_id.clone();
+                    let Some(turn_id) = edit_turn_id.clone() else {
+                        return;
+                    };
                     let previous_turn_id = previous_turn_id.clone();
                     let body = edit_body.to_string();
                     let _ = edit_history.update(cx, |history, cx| {
@@ -112,7 +126,9 @@ pub(super) fn render(
                 },
                 move |_, _, cx| {
                     cx.stop_propagation();
-                    let turn_id = turn_id.clone();
+                    let Some(turn_id) = turn_id.clone() else {
+                        return;
+                    };
                     let _ = fork_history
                         .update(cx, |history, cx| history.fork_user_message(turn_id, cx));
                 },

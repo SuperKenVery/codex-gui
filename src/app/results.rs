@@ -185,7 +185,57 @@ impl CodexGui {
     ) {
         match result {
             Ok(thread) => self.apply_thread_started(thread, cx),
-            Err(err) => self.apply_bridge_error(err.to_string(), cx),
+            Err(err) => {
+                let message = err.to_string();
+                if let Some(chat) = self.pending_thread_chat.take() {
+                    chat.update(cx, |chat, cx| {
+                        if let Some((client_id, _)) = chat.pending_user_message_request() {
+                            chat.fail_user_message(&client_id, message.clone());
+                        }
+                        chat.upsert_notice("thread-start-error".into(), message.clone());
+                        cx.notify();
+                    });
+                    tracing::error!(error = %message, "failed to start thread");
+                } else {
+                    self.apply_bridge_error(message, cx);
+                }
+            }
+        }
+    }
+
+    pub(super) fn apply_user_submission_result(
+        &mut self,
+        thread_id: &str,
+        client_user_message_id: &str,
+        result: Result<(), BridgeError>,
+        cx: &mut Context<Self>,
+    ) {
+        let Err(err) = result else {
+            return;
+        };
+        let message = err.to_string();
+        tracing::error!(
+            thread_id,
+            client_user_message_id,
+            error = %message,
+            "user message submission failed"
+        );
+        self.ui_state.update(cx, |state, cx| {
+            if state
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| turn.thread_id == thread_id)
+            {
+                state.clear_active_turn();
+                cx.notify();
+            }
+        });
+        if let Some(chat) = self.find_chat_entity(thread_id, cx) {
+            chat.update(cx, |chat, cx| {
+                chat.fail_user_message(client_user_message_id, message.clone());
+                chat.upsert_notice(format!("send-error-{client_user_message_id}"), message);
+                cx.notify();
+            });
         }
     }
 

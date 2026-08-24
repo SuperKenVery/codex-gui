@@ -1,5 +1,5 @@
 use crate::bridge::{AppServerBridge, BridgeEvent};
-use crate::gui::{ChatPanel, GuiState, SideChat, Sidebar, UiState};
+use crate::gui::{ChatPanel, ChatState, GuiState, SideChat, Sidebar, UiState};
 mod actions;
 mod effects;
 mod event_handler;
@@ -17,7 +17,7 @@ pub struct CodexGui {
     state: Entity<GuiState>,
     ui_state: Entity<UiState>,
     bridge: AppServerBridge,
-    pending_turn_text: Option<String>,
+    pending_thread_chat: Option<Entity<ChatState>>,
     sidebar: Entity<Sidebar>,
     chat_panel: Entity<ChatPanel>,
     side_chat: Entity<SideChat>,
@@ -67,7 +67,7 @@ impl CodexGui {
             state,
             ui_state,
             bridge,
-            pending_turn_text: None,
+            pending_thread_chat: None,
             sidebar,
             chat_panel,
             side_chat,

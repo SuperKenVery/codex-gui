@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use codex_app_server_protocol::{
-    FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn, TurnStatus,
+    FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn, TurnStatus, UserInput,
 };
 use gpui::{AppContext, Context, Entity, SharedString};
 
@@ -338,6 +338,7 @@ pub struct ChatState {
     pub subtitle: SharedString,
     pub thread: Option<Thread>,
     pub notices: Vec<HistoryNotice>,
+    pending_user_message: Option<PendingUserMessage>,
     message_states: HashMap<String, MessageState>,
     item_locations: HashMap<String, ThreadItemLocation>,
 }
@@ -355,6 +356,7 @@ impl ChatState {
             subtitle,
             thread: None,
             notices,
+            pending_user_message: None,
             message_states: HashMap::new(),
             item_locations: HashMap::new(),
         }
@@ -369,6 +371,7 @@ impl ChatState {
             subtitle,
             thread: Some(thread),
             notices: Vec::new(),
+            pending_user_message: None,
             message_states: HashMap::new(),
             item_locations,
         }
@@ -398,7 +401,68 @@ impl ChatState {
         }
     }
 
+    pub fn adopt_thread(&mut self, thread: Thread, title: SharedString, subtitle: SharedString) {
+        self.id = thread.id.clone();
+        self.title = title;
+        self.subtitle = subtitle;
+        self.thread = Some(thread);
+        self.rebuild_item_locations();
+        self.reconcile_pending_user_message();
+    }
+
+    pub fn begin_user_message(&mut self, client_id: String, text: String) -> bool {
+        if self.user_message_is_sending() {
+            return false;
+        }
+        self.pending_user_message = Some(PendingUserMessage {
+            client_id,
+            content: vec![UserInput::Text {
+                text,
+                text_elements: Vec::new(),
+            }],
+            delivery: PendingUserMessageDelivery::Sending,
+        });
+        true
+    }
+
+    pub fn pending_user_message(&self) -> Option<&PendingUserMessage> {
+        self.pending_user_message.as_ref()
+    }
+
+    pub fn pending_user_message_request(&self) -> Option<(String, String)> {
+        let message = self.pending_user_message.as_ref()?;
+        let text = message
+            .content
+            .iter()
+            .filter_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some((message.client_id.clone(), text))
+    }
+
+    pub fn user_message_is_sending(&self) -> bool {
+        self.pending_user_message
+            .as_ref()
+            .is_some_and(|message| matches!(message.delivery, PendingUserMessageDelivery::Sending))
+    }
+
+    pub fn fail_user_message(&mut self, client_id: &str, error: String) -> bool {
+        let Some(message) = self
+            .pending_user_message
+            .as_mut()
+            .filter(|message| message.client_id == client_id)
+        else {
+            return false;
+        };
+        message.delivery = PendingUserMessageDelivery::Failed(error.into());
+        true
+    }
+
     pub fn upsert_turn(&mut self, turn: Turn) {
+        self.acknowledge_user_message_in(&turn.items);
         if !matches!(turn.status, TurnStatus::InProgress) {
             for item in &turn.items {
                 self.message_states.remove(item.id());
@@ -420,6 +484,7 @@ impl ChatState {
     }
 
     pub fn complete_turn(&mut self, completed: Turn) {
+        self.acknowledge_user_message_in(&completed.items);
         let completed_id = completed.id.clone();
         let item_ids = {
             let Some(thread) = &mut self.thread else {
@@ -453,6 +518,7 @@ impl ChatState {
     }
 
     pub fn start_item(&mut self, turn_id: &str, item: ThreadItem) {
+        self.acknowledge_user_message_in(std::slice::from_ref(&item));
         let item_id = item.id().to_string();
         self.message_states
             .insert(item_id, MessageState::streaming());
@@ -460,6 +526,7 @@ impl ChatState {
     }
 
     pub fn complete_item(&mut self, item: ThreadItem) {
+        self.acknowledge_user_message_in(std::slice::from_ref(&item));
         let item_id = item.id().to_string();
         self.replace_thread_item(item);
         if let Some(state) = self.message_states.get_mut(&item_id) {
@@ -582,6 +649,69 @@ impl ChatState {
             .map(thread_item_locations)
             .unwrap_or_default();
     }
+
+    fn acknowledge_user_message_in(&mut self, items: &[ThreadItem]) {
+        let Some(pending_client_id) = self
+            .pending_user_message
+            .as_ref()
+            .map(|message| message.client_id.as_str())
+        else {
+            return;
+        };
+        let acknowledged = items.iter().any(|item| {
+            matches!(
+                item,
+                ThreadItem::UserMessage {
+                    client_id: Some(client_id),
+                    ..
+                } if client_id == pending_client_id
+            )
+        });
+        if acknowledged {
+            self.pending_user_message = None;
+        }
+    }
+
+    fn reconcile_pending_user_message(&mut self) {
+        let Some(pending_client_id) = self
+            .pending_user_message
+            .as_ref()
+            .map(|message| message.client_id.as_str())
+        else {
+            return;
+        };
+        let acknowledged = self.thread.as_ref().is_some_and(|thread| {
+            thread
+                .turns
+                .iter()
+                .flat_map(|turn| turn.items.iter())
+                .any(|item| {
+                    matches!(
+                        item,
+                        ThreadItem::UserMessage {
+                            client_id: Some(client_id),
+                            ..
+                        } if client_id == pending_client_id
+                    )
+                })
+        });
+        if acknowledged {
+            self.pending_user_message = None;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PendingUserMessage {
+    pub client_id: String,
+    pub content: Vec<UserInput>,
+    pub delivery: PendingUserMessageDelivery,
+}
+
+#[derive(Clone)]
+pub enum PendingUserMessageDelivery {
+    Sending,
+    Failed(SharedString),
 }
 
 #[derive(Clone)]
@@ -707,6 +837,71 @@ pub struct ActiveTurn {
 mod tests {
     use super::*;
     use codex_app_server_protocol::{TurnItemsView, UserInput};
+
+    #[test]
+    fn canonical_user_message_acknowledges_matching_pending_message() {
+        let mut chat = ChatState::new(
+            "thread-1".into(),
+            "Thread".into(),
+            "idle".into(),
+            Vec::new(),
+        );
+        assert!(chat.begin_user_message("client-1".into(), "hello".into()));
+
+        chat.start_item(
+            "turn-1",
+            ThreadItem::UserMessage {
+                id: "user-1".into(),
+                client_id: Some("client-1".into()),
+                content: vec![UserInput::Text {
+                    text: "hello".into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+        );
+
+        assert!(chat.pending_user_message().is_none());
+    }
+
+    #[test]
+    fn unrelated_user_message_does_not_acknowledge_pending_message() {
+        let mut chat = ChatState::new(
+            "thread-1".into(),
+            "Thread".into(),
+            "idle".into(),
+            Vec::new(),
+        );
+        assert!(chat.begin_user_message("client-1".into(), "hello".into()));
+
+        chat.start_item(
+            "turn-1",
+            ThreadItem::UserMessage {
+                id: "user-2".into(),
+                client_id: Some("client-2".into()),
+                content: vec![UserInput::Text {
+                    text: "other".into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+        );
+
+        assert!(chat.user_message_is_sending());
+    }
+
+    #[test]
+    fn failed_pending_message_no_longer_blocks_another_submission() {
+        let mut chat = ChatState::new(
+            "thread-1".into(),
+            "Thread".into(),
+            "idle".into(),
+            Vec::new(),
+        );
+        assert!(chat.begin_user_message("client-1".into(), "hello".into()));
+        assert!(chat.fail_user_message("client-1", "offline".into()));
+
+        assert!(!chat.user_message_is_sending());
+        assert!(chat.begin_user_message("client-2".into(), "retry".into()));
+    }
 
     #[test]
     fn turn_completion_preserves_live_items_and_updates_metadata() {

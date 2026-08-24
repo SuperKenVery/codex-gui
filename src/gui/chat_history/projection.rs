@@ -3,10 +3,10 @@ use std::{collections::HashSet, time::Duration};
 use codex_app_server_protocol::{ThreadItem, Turn, TurnStatus, UserInput};
 use codex_protocol::models::MessagePhase;
 
-use crate::gui::ChatState;
+use crate::gui::{ChatState, PendingUserMessageDelivery};
 
 use super::{
-    blocks::{HistoryBlock, is_tool_item, tool_call_views, tools_done},
+    blocks::{HistoryBlock, UserMessageDelivery, is_tool_item, tool_call_views, tools_done},
     transcript::TranscriptSnapshot,
 };
 
@@ -29,6 +29,23 @@ pub(super) fn build_transcript(
                 expanded_tool_groups,
             );
             previous_turn_id = Some(turn.id.as_str());
+        }
+    }
+
+    if let Some(message) = chat.pending_user_message() {
+        let body = user_input_text(&message.content);
+        if !body.is_empty() {
+            let delivery = match &message.delivery {
+                PendingUserMessageDelivery::Sending => UserMessageDelivery::Sending,
+                PendingUserMessageDelivery::Failed(_) => UserMessageDelivery::Failed,
+            };
+            transcript.push_block(HistoryBlock::User {
+                key: message.client_id.clone(),
+                turn_id: None,
+                previous_turn_id: None,
+                body: body.into(),
+                delivery,
+            });
         }
     }
 
@@ -107,14 +124,19 @@ fn append_items(
     let mut index = 0;
     while index < items.len() {
         match &items[index] {
-            ThreadItem::UserMessage { id, content, .. } => {
+            ThreadItem::UserMessage {
+                id,
+                client_id,
+                content,
+            } => {
                 let body = user_input_text(content);
                 if !body.is_empty() {
                     transcript.push_block(HistoryBlock::User {
-                        key: id.clone(),
-                        turn_id: turn_id.to_string(),
+                        key: client_id.clone().unwrap_or_else(|| id.clone()),
+                        turn_id: Some(turn_id.to_string()),
                         previous_turn_id: previous_turn_id.map(str::to_string),
                         body: body.into(),
+                        delivery: UserMessageDelivery::Sent,
                     });
                 }
                 index += 1;

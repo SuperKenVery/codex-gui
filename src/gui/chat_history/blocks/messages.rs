@@ -1,9 +1,15 @@
-use gpui::{App, ClickEvent, ClipboardItem, ParentElement, SharedString, Styled, Window, div, px};
+use gpui::{
+    App, ClickEvent, ClipboardItem, ParentElement, SharedString, Styled, Window, div, prelude::*,
+    px,
+};
 use gpui_component::{
     Sizable as _,
     button::{Button, ButtonVariants as _},
+    spinner::Spinner,
     theme::Theme,
 };
+
+use super::UserMessageDelivery;
 
 pub(super) fn render_assistant_header(author: &'static str, theme: &Theme) -> gpui::Div {
     div()
@@ -18,6 +24,8 @@ pub(super) fn render_assistant_header(author: &'static str, theme: &Theme) -> gp
 pub(super) fn render_user(
     key: &str,
     body: SharedString,
+    delivery: UserMessageDelivery,
+    actions_available: bool,
     theme: &Theme,
     on_edit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_fork: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -60,35 +68,51 @@ pub(super) fn render_user(
                         .gap_1()
                         .pt_1()
                         .pr_1()
-                        .child(
-                            Button::new(format!("copy-user-message-{key}"))
-                                .xsmall()
-                                .ghost()
-                                .label("Copy")
-                                .tooltip("Copy message")
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_body.to_string(),
-                                    ));
-                                }),
-                        )
-                        .child(
-                            Button::new(format!("edit-user-message-{key}"))
-                                .xsmall()
-                                .ghost()
-                                .label("Edit")
-                                .tooltip("Edit message in a fork")
-                                .on_click(on_edit),
-                        )
-                        .child(
-                            Button::new(format!("fork-user-message-{key}"))
-                                .xsmall()
-                                .ghost()
-                                .label("Fork")
-                                .tooltip("Fork chat from this message")
-                                .on_click(on_fork),
-                        ),
+                        .when(matches!(delivery, UserMessageDelivery::Sending), |footer| {
+                            footer
+                                .child(Spinner::new().xsmall().color(theme.muted_foreground))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Sending…"),
+                                )
+                        })
+                        .when(matches!(delivery, UserMessageDelivery::Failed), |footer| {
+                            footer.child(div().text_xs().text_color(theme.danger).child("Not sent"))
+                        })
+                        .when(actions_available, |footer| {
+                            footer
+                                .child(
+                                    Button::new(format!("copy-user-message-{key}"))
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Copy")
+                                        .tooltip("Copy message")
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_body.to_string(),
+                                            ));
+                                        }),
+                                )
+                                .child(
+                                    Button::new(format!("edit-user-message-{key}"))
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Edit")
+                                        .tooltip("Edit message in a fork")
+                                        .on_click(on_edit),
+                                )
+                                .child(
+                                    Button::new(format!("fork-user-message-{key}"))
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Fork")
+                                        .tooltip("Fork chat from this message")
+                                        .on_click(on_fork),
+                                )
+                        }),
                 ),
         )
 }

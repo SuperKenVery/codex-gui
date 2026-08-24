@@ -5,10 +5,11 @@ use super::{
     thread_mapping::{empty_chat_entity, project_name_from_path, should_start_thread_for_turn},
 };
 use crate::{
-    gui::{ApprovalReviewerMode, ProjectState},
+    gui::{ApprovalReviewerMode, ChatState, ProjectState, single_line_title},
     workspace::workspace_path,
 };
 use gpui::{AppContext, Context};
+use uuid::Uuid;
 
 impl CodexGui {
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -55,11 +56,12 @@ impl CodexGui {
 
     pub(crate) fn select_chat(&mut self, index: usize, cx: &mut Context<Self>) {
         let thread_id = self.state.read(cx).active_project().and_then(|project| {
-            project
-                .read(cx)
-                .chats
-                .get(index)
-                .map(|chat| chat.read(cx).id.clone())
+            project.read(cx).chats.get(index).and_then(|chat| {
+                chat.read(cx)
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.id.clone())
+            })
         });
 
         self.state.update(cx, |state, cx| {
@@ -150,6 +152,7 @@ impl CodexGui {
             "replacing thread for edited message"
         );
         let settings = self.state.read(cx).chat_settings.clone();
+        let client_user_message_id = new_client_user_message_id();
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
             let _notification_mute = bridge.mute_thread_notifications();
@@ -175,6 +178,28 @@ impl CodexGui {
                 return;
             }
 
+            let pending_started = this
+                .update(cx, |view, cx| {
+                    view.active_chat_entity(cx)
+                        .filter(|chat| chat.read(cx).id == replacement_thread_id)
+                        .is_some_and(|chat| {
+                            chat.update(cx, |chat, cx| {
+                                let started = chat.begin_user_message(
+                                    client_user_message_id.clone(),
+                                    text.clone(),
+                                );
+                                if started {
+                                    cx.notify();
+                                }
+                                started
+                            })
+                        })
+                })
+                .unwrap_or(false);
+            if !pending_started {
+                return;
+            }
+
             match bridge.delete_thread(source_thread_id.clone()).await {
                 Ok(()) => {
                     let _ = this.update(cx, |view, cx| {
@@ -188,10 +213,22 @@ impl CodexGui {
             }
 
             let result = bridge
-                .send_turn(replacement_thread_id, text, settings)
+                .send_turn(
+                    replacement_thread_id.clone(),
+                    client_user_message_id.clone(),
+                    text,
+                    settings,
+                )
                 .await
                 .map(|_| ());
-            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+            let _ = this.update(cx, |view, cx| {
+                view.apply_user_submission_result(
+                    &replacement_thread_id,
+                    &client_user_message_id,
+                    result,
+                    cx,
+                )
+            });
         })
         .detach();
     }
@@ -209,6 +246,7 @@ impl CodexGui {
         tracing::info!(cwd, "starting thread");
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
+            let _notification_mute = bridge.mute_thread_notifications();
             let result = bridge.start_thread(cwd, settings).await;
             let _ = this.update(cx, |view, cx| view.apply_thread_started_result(result, cx));
         })
@@ -220,34 +258,91 @@ impl CodexGui {
     /// If the UI is on the new-chat page, this stashes the text, creates a
     /// thread, and lets `apply_thread_started` send the pending first turn.
     pub(crate) fn submit_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
-        if self.ui_state.read(cx).active_turn.is_some() {
+        if self.ui_state.read(cx).active_turn.is_some() || self.pending_thread_chat.is_some() {
             return;
         }
 
-        let active_thread_id = self
-            .active_chat_entity(cx)
-            .map(|chat| chat.read(cx).id.clone())
-            .filter(|thread_id| thread_id != "empty");
+        let active_thread_id = self.active_chat_entity(cx).and_then(|chat| {
+            chat.read(cx)
+                .thread
+                .as_ref()
+                .map(|thread| thread.id.clone())
+        });
         let new_chat_open = self.ui_state.read(cx).new_chat_open;
 
         if should_start_thread_for_turn(new_chat_open, active_thread_id.as_deref()) {
-            self.pending_turn_text = Some(text);
+            let Some(project) = self.active_project_entity(cx) else {
+                return;
+            };
+            let cwd = project.read(cx).path.to_string();
+            let client_user_message_id = new_client_user_message_id();
+            let title = single_line_title(&text);
+            let pending_chat_id = format!("pending-{client_user_message_id}");
+            let pending_chat = cx.new(|_| {
+                let mut chat = ChatState::new(
+                    pending_chat_id,
+                    title.into(),
+                    format!("starting - {cwd}").into(),
+                    Vec::new(),
+                );
+                chat.begin_user_message(client_user_message_id, text);
+                chat
+            });
+            project.update(cx, |project, cx| {
+                project.chats.retain(|chat| {
+                    let chat = chat.read(cx);
+                    chat.id.as_str() != "empty" && !chat.id.starts_with("pending-")
+                });
+                project.chats.insert(0, pending_chat.clone());
+                cx.notify();
+            });
+            self.state.update(cx, |state, cx| {
+                state.select_chat(0);
+                cx.notify();
+            });
+            self.ui_state.update(cx, |state, cx| {
+                state.close_new_chat();
+                cx.notify();
+            });
+            self.pending_thread_chat = Some(pending_chat);
             self.start_new_thread(cx);
             return;
         }
 
-        let Some(thread_id) = active_thread_id else {
+        let Some(chat) = self.active_chat_entity(cx) else {
             return;
         };
+        if chat.read(cx).user_message_is_sending() {
+            return;
+        }
+        let thread_id = chat.read(cx).id.clone();
+        let client_user_message_id = new_client_user_message_id();
+        let pending_started = chat.update(cx, |chat, cx| {
+            let started = chat.begin_user_message(client_user_message_id.clone(), text.clone());
+            if started {
+                cx.notify();
+            }
+            started
+        });
+        if !pending_started {
+            return;
+        }
         let settings = self.state.read(cx).chat_settings.clone();
         tracing::info!(thread_id, "starting turn");
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
             let result = bridge
-                .send_turn(thread_id, text, settings)
+                .send_turn(
+                    thread_id.clone(),
+                    client_user_message_id.clone(),
+                    text,
+                    settings,
+                )
                 .await
                 .map(|_| ());
-            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+            let _ = this.update(cx, |view, cx| {
+                view.apply_user_submission_result(&thread_id, &client_user_message_id, result, cx)
+            });
         })
         .detach();
     }
@@ -256,13 +351,27 @@ impl CodexGui {
         let Some(active_turn) = self.ui_state.read(cx).active_turn.clone() else {
             return;
         };
-        let Some(active_thread_id) = self
+        let Some(chat) = self
             .active_chat_entity(cx)
-            .map(|chat| chat.read(cx).id.clone())
-            .filter(|thread_id| thread_id == &active_turn.thread_id)
+            .filter(|chat| chat.read(cx).id == active_turn.thread_id)
         else {
             return;
         };
+        if chat.read(cx).user_message_is_sending() {
+            return;
+        }
+        let active_thread_id = chat.read(cx).id.clone();
+        let client_user_message_id = new_client_user_message_id();
+        let pending_started = chat.update(cx, |chat, cx| {
+            let started = chat.begin_user_message(client_user_message_id.clone(), text.clone());
+            if started {
+                cx.notify();
+            }
+            started
+        });
+        if !pending_started {
+            return;
+        }
         tracing::info!(
             thread_id = active_thread_id,
             turn_id = active_turn.turn_id,
@@ -271,10 +380,22 @@ impl CodexGui {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
             let result = bridge
-                .steer_turn(active_thread_id, active_turn.turn_id, text)
+                .steer_turn(
+                    active_thread_id.clone(),
+                    active_turn.turn_id,
+                    client_user_message_id.clone(),
+                    text,
+                )
                 .await
                 .map(|_| ());
-            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+            let _ = this.update(cx, |view, cx| {
+                view.apply_user_submission_result(
+                    &active_thread_id,
+                    &client_user_message_id,
+                    result,
+                    cx,
+                )
+            });
         })
         .detach();
     }
@@ -350,11 +471,12 @@ impl CodexGui {
         if self.ui_state.read(cx).new_chat_open {
             return;
         }
-        let Some(thread_id) = self
-            .active_chat_entity(cx)
-            .map(|chat| chat.read(cx).id.clone())
-            .filter(|thread_id| thread_id != "empty" && thread_id != "bridge-error")
-        else {
+        let Some(thread_id) = self.active_chat_entity(cx).and_then(|chat| {
+            chat.read(cx)
+                .thread
+                .as_ref()
+                .map(|thread| thread.id.clone())
+        }) else {
             return;
         };
         let settings = self.state.read(cx).chat_settings.clone();
@@ -366,4 +488,8 @@ impl CodexGui {
         })
         .detach();
     }
+}
+
+fn new_client_user_message_id() -> String {
+    format!("codex-gui-{}", Uuid::new_v4())
 }

@@ -99,6 +99,9 @@ impl ChatPanel {
     }
 
     fn send_composer_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.user_message_sending(cx) {
+            return;
+        }
         let text = self.composer_input.update(cx, |input, cx| {
             let text = input.value().trim().to_string();
             if !text.is_empty() {
@@ -159,6 +162,9 @@ impl ChatPanel {
     }
 
     fn steer_composer_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.user_message_sending(cx) {
+            return;
+        }
         let text = self.composer_input.update(cx, |input, cx| {
             let text = input.value().trim().to_string();
             if !text.is_empty() {
@@ -196,6 +202,13 @@ impl ChatPanel {
             .active_turn
             .as_ref()
             .is_some_and(|active_turn| active_turn.thread_id == active_thread_id)
+    }
+
+    fn user_message_sending(&self, cx: &mut Context<Self>) -> bool {
+        self.state
+            .read(cx)
+            .active_chat_entity(cx)
+            .is_some_and(|chat| chat.read(cx).user_message_is_sending())
     }
 
     fn fork_chat_through(&mut self, turn_id: String, cx: &mut Context<Self>) {
@@ -267,6 +280,7 @@ impl ChatPanel {
                 ]
             });
         let turn_running = self.active_chat_turn_running(cx);
+        let user_message_sending = self.user_message_sending(cx);
 
         div()
             .w_full()
@@ -449,6 +463,7 @@ impl ChatPanel {
                                     Button::new("steer-composer-turn")
                                         .small()
                                         .primary()
+                                        .loading(user_message_sending)
                                         .rounded(px(999.))
                                         .icon(IconName::ArrowUp)
                                         .tooltip("Steer")
@@ -460,6 +475,7 @@ impl ChatPanel {
                             .child(
                                 Button::new("send-or-stop-composer-turn")
                                     .small()
+                                    .loading(!turn_running && user_message_sending)
                                     .when(!turn_running, |button| button.primary())
                                     .when(turn_running, |button| button.danger())
                                     .rounded(px(999.))

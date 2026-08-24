@@ -117,7 +117,22 @@ impl CodexGui {
         let thread_id = thread.id.clone();
         let updated_at = thread.updated_at;
         let cwd = thread.cwd.to_string_lossy().into_owned();
-        let chat = chat_entity_from_thread(thread, cx);
+        let pending_chat = self.pending_thread_chat.take();
+        let chat = if let Some(chat) = pending_chat.as_ref() {
+            let title = thread_title(thread.name.as_deref(), &thread.preview);
+            let subtitle = format!(
+                "{} - {}",
+                thread_status_label(&thread.status),
+                thread.cwd.display()
+            );
+            chat.update(cx, |chat, cx| {
+                chat.adopt_thread(thread, title.into(), subtitle.into());
+                cx.notify();
+            });
+            chat.clone()
+        } else {
+            chat_entity_from_thread(thread, cx)
+        };
         let mut selected_chat_index = 0;
         if let Some(project) = self.ensure_project_for_cwd(&cwd, cx) {
             selected_chat_index = project.update(cx, |project, cx| {
@@ -139,16 +154,31 @@ impl CodexGui {
             cx.notify();
         });
         tracing::info!(thread_id, "thread ready");
-        if let Some(text) = self.pending_turn_text.take() {
+        if let Some((client_user_message_id, text)) = pending_chat
+            .as_ref()
+            .and_then(|chat| chat.read(cx).pending_user_message_request())
+        {
             let settings = self.state.read(cx).chat_settings.clone();
             tracing::info!(thread_id, "starting first turn");
             let bridge = self.bridge.clone();
             cx.spawn(async move |this, cx| {
                 let result = bridge
-                    .send_turn(thread_id, text, settings)
+                    .send_turn(
+                        thread_id.clone(),
+                        client_user_message_id.clone(),
+                        text,
+                        settings,
+                    )
                     .await
                     .map(|_| ());
-                let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+                let _ = this.update(cx, |view, cx| {
+                    view.apply_user_submission_result(
+                        &thread_id,
+                        &client_user_message_id,
+                        result,
+                        cx,
+                    )
+                });
             })
             .detach();
         }
@@ -382,7 +412,7 @@ impl CodexGui {
         Some(project)
     }
 
-    fn find_chat_entity(
+    pub(super) fn find_chat_entity(
         &self,
         thread_id: &str,
         cx: &mut Context<Self>,
@@ -395,12 +425,13 @@ impl CodexGui {
         {
             return Some(chat.clone());
         }
-        let project = state.active_project()?;
-        let chats = project.read(cx).chats.clone();
-        for chat in chats {
-            let is_match = chat.read(cx).id == thread_id;
-            if is_match {
-                return Some(chat);
+        for project in &state.projects {
+            let chats = project.read(cx).chats.clone();
+            for chat in chats {
+                let is_match = chat.read(cx).id == thread_id;
+                if is_match {
+                    return Some(chat);
+                }
             }
         }
         None

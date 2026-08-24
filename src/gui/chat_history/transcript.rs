@@ -144,24 +144,27 @@ fn html_attr(value: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::chat_history::blocks::UserMessageDelivery;
 
     #[test]
     fn streaming_markdown_is_a_strict_source_append() {
         let mut before = TranscriptSnapshot::new();
         before.push_block(HistoryBlock::User {
             key: "user-1".into(),
-            turn_id: "turn-1".into(),
+            turn_id: Some("turn-1".into()),
             previous_turn_id: None,
             body: "hello".into(),
+            delivery: UserMessageDelivery::Sent,
         });
         before.push_markdown("A partial reply");
 
         let mut after = TranscriptSnapshot::new();
         after.push_block(HistoryBlock::User {
             key: "user-1".into(),
-            turn_id: "turn-1".into(),
+            turn_id: Some("turn-1".into()),
             previous_turn_id: None,
             body: "hello".into(),
+            delivery: UserMessageDelivery::Sent,
         });
         after.push_markdown("A partial reply with another chunk");
 
@@ -169,6 +172,29 @@ mod tests {
             after.markdown.strip_prefix(&before.markdown),
             Some(" with another chunk")
         );
+    }
+
+    #[test]
+    fn optimistic_user_ack_keeps_the_source_marker() {
+        let mut sending = TranscriptSnapshot::new();
+        sending.push_block(HistoryBlock::User {
+            key: "client-user-1".into(),
+            turn_id: None,
+            previous_turn_id: None,
+            body: "hello".into(),
+            delivery: UserMessageDelivery::Sending,
+        });
+
+        let mut acknowledged = TranscriptSnapshot::new();
+        acknowledged.push_block(HistoryBlock::User {
+            key: "client-user-1".into(),
+            turn_id: Some("turn-1".into()),
+            previous_turn_id: None,
+            body: "hello".into(),
+            delivery: UserMessageDelivery::Sent,
+        });
+
+        assert_eq!(sending.markdown, acknowledged.markdown);
     }
 
     #[test]

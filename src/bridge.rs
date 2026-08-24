@@ -308,6 +308,7 @@ impl AppServerBridge {
     pub async fn send_turn(
         &self,
         thread_id: String,
+        client_user_message_id: String,
         text: String,
         settings: ChatSettings,
     ) -> BridgeResult<TurnStartResponse> {
@@ -315,7 +316,7 @@ impl AppServerBridge {
             request_id,
             params: TurnStartParams {
                 thread_id,
-                client_user_message_id: None,
+                client_user_message_id: Some(client_user_message_id),
                 input: vec![UserInput::Text {
                     text,
                     text_elements: Vec::new(),
@@ -346,13 +347,14 @@ impl AppServerBridge {
         &self,
         thread_id: String,
         turn_id: String,
+        client_user_message_id: String,
         text: String,
     ) -> BridgeResult<TurnSteerResponse> {
         self.request(|request_id| ClientRequest::TurnSteer {
             request_id,
             params: TurnSteerParams {
                 thread_id,
-                client_user_message_id: None,
+                client_user_message_id: Some(client_user_message_id),
                 input: vec![UserInput::Text {
                     text,
                     text_elements: Vec::new(),
@@ -543,16 +545,15 @@ async fn build_embedded_client(
     .map_err(|err| {
         BridgeError::Transport(format!("failed to configure Codex helper paths: {err}"))
     })?;
-    let environment_manager =
-        EnvironmentManager::from_codex_home(
-            config.codex_home.clone(),
-            Some(runtime_paths),
-            config.http_client_factory(),
-        )
-            .await
-            .map_err(|err| {
-                BridgeError::Transport(format!("failed to initialize Codex environments: {err}"))
-            })?;
+    let environment_manager = EnvironmentManager::from_codex_home(
+        config.codex_home.clone(),
+        Some(runtime_paths),
+        config.http_client_factory(),
+    )
+    .await
+    .map_err(|err| {
+        BridgeError::Transport(format!("failed to initialize Codex environments: {err}"))
+    })?;
     let state_db = codex_core::init_state_db(&config).await;
 
     InProcessAppServerClient::start(InProcessClientStartArgs {
