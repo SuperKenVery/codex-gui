@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
+    AnyElement, App, Bounds, ClickEvent, DefiniteLength, Element, ElementId, Entity,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, MouseButton, ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window,
+    div,
 };
 
 use crate::StyledExt;
@@ -69,6 +70,7 @@ pub struct TextView {
     selectable: bool,
     selection_format: SelectionFormat,
     scrollable: bool,
+    content_max_width: Option<DefiniteLength>,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
@@ -110,6 +112,7 @@ impl TextView {
             selectable: false,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            content_max_width: None,
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -128,6 +131,7 @@ impl TextView {
             selectable: false,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            content_max_width: None,
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -146,6 +150,7 @@ impl TextView {
             selectable: false,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            content_max_width: None,
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -187,6 +192,17 @@ impl TextView {
     /// This mode is suitable for small content, such as a few lines of text, a label, etc.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Limit the width of the rendered document while keeping the TextView's
+    /// viewport full-width. Document blocks are centered within the viewport.
+    ///
+    /// In scrollable mode the underlying list and its wheel-event hit area
+    /// remain full-width, and only the content inside each list item is
+    /// constrained.
+    pub fn content_max_width(mut self, width: impl Into<DefiniteLength>) -> Self {
+        self.content_max_width = Some(width.into());
         self
     }
 
@@ -335,6 +351,14 @@ impl Element for TextView {
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
+            if state.content_max_width != self.content_max_width {
+                state.content_max_width = self.content_max_width;
+                state
+                    .list_state
+                    .reset(state.parsed_content.document.blocks.len());
+                state.list_state.clone().measure_all();
+                state.selection_revision = state.selection_revision.wrapping_add(1);
+            }
             if state.text_view_style != self.text_view_style {
                 state.selection_revision = state.selection_revision.wrapping_add(1);
             }
@@ -606,6 +630,67 @@ mod tests {
             top_level_action.right() - nested_action.right() < px(32.),
             "nested code block should fill the list item's available width"
         );
+    }
+
+    #[gpui::test]
+    fn content_max_width_keeps_scroll_viewport_full_width(cx: &mut TestAppContext) {
+        struct ConstrainedTextViewRoot {
+            text_view: Entity<TextViewState>,
+        }
+
+        impl Render for ConstrainedTextViewRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().w(px(1000.)).h(px(120.)).child(
+                    TextView::new(&self.text_view)
+                        .scrollable(true)
+                        .content_max_width(px(400.))
+                        .size_full(),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|cx| ConstrainedTextViewRoot {
+                text_view: cx.new(|cx| {
+                    TextViewState::markdown(
+                        &(0..20)
+                            .map(|ix| format!("Paragraph {ix}"))
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                        cx,
+                    )
+                }),
+            });
+            crate::Root::new(content, window, cx)
+        });
+        let content = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<ConstrainedTextViewRoot>()
+                .unwrap()
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let viewport = content.read_with(cx, |content, cx| {
+            content.text_view.read(cx).list_state.viewport_bounds()
+        });
+        let column = cx.debug_bounds("text-view-content-column-0").unwrap();
+        let scrollbar_overlay = cx.debug_bounds("scrollbar-overlay").unwrap();
+
+        assert_eq!(viewport.size.width, px(1000.));
+        assert_eq!(scrollbar_overlay.size.width, viewport.size.width);
+        assert_eq!(column.size.width, px(400.));
+        assert_eq!(column.left() - viewport.left(), px(300.));
     }
 
     #[test]

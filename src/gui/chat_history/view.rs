@@ -183,6 +183,7 @@ impl Render for ChatHistory {
                     })
                     .selectable(true)
                     .scrollable(true)
+                    .content_max_width(px(820.))
                     .size_full()
                     .min_w_0()
                     .text_base()

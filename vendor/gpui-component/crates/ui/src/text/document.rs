@@ -1,6 +1,6 @@
 use gpui::{
-    App, InteractiveElement as _, IntoElement, ListState, ParentElement as _, SharedString,
-    Styled as _, Window, div,
+    AnyElement, App, DefiniteLength, InteractiveElement as _, IntoElement, ListState,
+    ParentElement as _, SharedString, Styled as _, Window, div,
 };
 
 use std::{ops::RangeInclusive, sync::Arc};
@@ -191,6 +191,7 @@ impl ParsedDocument {
     pub(super) fn render_root(
         &self,
         list_state: Option<ListState>,
+        content_max_width: Option<DefiniteLength>,
         node_cx: &NodeContext,
         window: &mut Window,
         cx: &mut App,
@@ -201,15 +202,19 @@ impl ParsedDocument {
                 .id("document")
                 .children(self.blocks.iter().enumerate().map(move |(ix, node)| {
                     let is_last = ix + 1 == blocks_len;
-                    node.render_block(
-                        NodeRenderOptions {
-                            ix,
-                            is_last,
-                            ..Default::default()
-                        },
-                        node_cx,
-                        window,
-                        cx,
+                    render_content_column(
+                        ix,
+                        content_max_width,
+                        node.render_block(
+                            NodeRenderOptions {
+                                ix,
+                                is_last,
+                                ..Default::default()
+                            },
+                            node_cx,
+                            window,
+                            cx,
+                        ),
                     )
                 }));
         };
@@ -231,8 +236,10 @@ impl ParsedDocument {
                 let blocks = blocks.clone();
                 move |ix, window, cx| {
                     let is_last = ix + 1 == blocks.len();
-                    blocks[ix]
-                        .render_block(
+                    render_content_column(
+                        ix,
+                        content_max_width,
+                        blocks[ix].render_block(
                             NodeRenderOptions {
                                 ix,
                                 is_last,
@@ -241,11 +248,37 @@ impl ParsedDocument {
                             &node_cx,
                             window,
                             cx,
-                        )
-                        .into_any_element()
+                        ),
+                    )
                 }
             })
             .size_full(),
         )
     }
+}
+
+fn render_content_column(
+    ix: usize,
+    max_width: Option<DefiniteLength>,
+    block: AnyElement,
+) -> AnyElement {
+    let Some(max_width) = max_width else {
+        return block;
+    };
+
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id(("content-column", ix))
+                .debug_selector(move || format!("text-view-content-column-{ix}"))
+                .w_full()
+                .min_w_0()
+                .max_w(max_width)
+                .child(block),
+        )
+        .into_any_element()
 }

@@ -2,8 +2,8 @@ use futures::Stream as _;
 use std::{ops::RangeInclusive, pin::Pin, sync::Arc, task::Poll};
 
 use gpui::{
-    App, AppContext as _, Bounds, Context, FocusHandle, IntoElement, KeyBinding, ListState,
-    ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Task, Window,
+    App, AppContext as _, Bounds, Context, DefiniteLength, FocusHandle, IntoElement, KeyBinding,
+    ListState, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Task, Window,
     prelude::FluentBuilder as _, px,
 };
 
@@ -78,6 +78,7 @@ pub struct TextViewState {
     pub(super) selectable: bool,
     pub(super) selection_format: SelectionFormat,
     pub(super) scrollable: bool,
+    pub(super) content_max_width: Option<DefiniteLength>,
     pub(super) text_view_style: TextViewStyle,
     pub(super) code_block_actions: Option<std::sync::Arc<CodeBlockActionsFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
@@ -175,6 +176,7 @@ impl TextViewState {
             selectable: false,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            content_max_width: None,
             // Measure all blocks (not just visible ones) so the scrollbar
             // thumb size stays stable. Without this, off-screen blocks count
             // as zero height until scrolled into view, which makes the
@@ -595,6 +597,7 @@ impl Render for TextViewState {
                     } else {
                         None
                     },
+                    self.content_max_width,
                     &node_cx,
                     window,
                     cx,

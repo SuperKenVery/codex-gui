@@ -653,15 +653,8 @@ impl Render for ChatPanel {
                         .min_w_0()
                         .min_h_0()
                         .overflow_hidden()
-                        .px_5()
                         .py_4()
-                        .child(
-                            div()
-                                .size_full()
-                                .max_w(px(820.))
-                                .mx_auto()
-                                .child(self.history.clone()),
-                        ),
+                        .child(self.history.clone()),
                 )
                 .child(self.composer(cx))
             })
