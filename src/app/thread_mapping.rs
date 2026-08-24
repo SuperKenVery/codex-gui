@@ -1,6 +1,6 @@
 use super::CodexGui;
-use crate::gui::{ChatState, HistoryEntryKind, HistoryKey, MessageState, StreamState};
-use codex_app_server_protocol::{Thread, ThreadItem, ThreadStatus, UserInput};
+use crate::gui::{ChatState, HistoryNotice};
+use codex_app_server_protocol::{Thread, ThreadStatus};
 use gpui::{AppContext, Context, Entity};
 use std::path::Path;
 
@@ -14,13 +14,7 @@ pub(super) fn chat_entity_from_thread(
         thread_status_label(&thread.status),
         thread.cwd.display()
     );
-    let mut messages = Vec::new();
-    for turn in &thread.turns {
-        for item in &turn.items {
-            append_thread_item(&mut messages, item.clone(), cx);
-        }
-    }
-    cx.new(|_| ChatState::from_thread(thread, title.into(), subtitle.into(), messages))
+    cx.new(|_| ChatState::from_thread(thread, title.into(), subtitle.into()))
 }
 
 pub(super) fn thread_title(name: Option<&str>, preview: &str) -> String {
@@ -34,16 +28,15 @@ pub(super) fn thread_title(name: Option<&str>, preview: &str) -> String {
 }
 
 pub(super) fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
-    cx.new(|cx| {
+    cx.new(|_| {
         ChatState::new(
             "empty".into(),
             "No Codex threads".into(),
             "Click New to start one in this workspace".into(),
-            vec![cx.new(|_| {
-                MessageState::notice(
-                    "No persisted Codex threads were returned for this workspace.".into(),
-                )
-            })],
+            vec![HistoryNotice {
+                id: "empty-thread-list".into(),
+                body: "No persisted Codex threads were returned for this workspace.".into(),
+            }],
         )
     })
 }
@@ -57,73 +50,6 @@ pub(super) fn project_name_from_path(path: &str) -> String {
         .to_string()
 }
 
-pub(super) fn append_thread_item(
-    messages: &mut Vec<Entity<MessageState>>,
-    item: ThreadItem,
-    cx: &mut Context<CodexGui>,
-) {
-    match item {
-        ThreadItem::UserMessage { id, content, .. } => {
-            let text = user_input_text(&content);
-            if !text.is_empty() {
-                messages.push(cx.new(|_| {
-                    MessageState::item(
-                        HistoryKey::Item(id),
-                        HistoryEntryKind::User,
-                        None,
-                        StreamState::Complete,
-                    )
-                }));
-            }
-        }
-        ThreadItem::AgentMessage { id, text, .. } => {
-            messages.push(cx.new(|_| {
-                MessageState::item(
-                    HistoryKey::Item(id.clone()),
-                    HistoryEntryKind::Assistant,
-                    Some(text),
-                    StreamState::Complete,
-                )
-            }));
-        }
-        ThreadItem::CommandExecution { id, .. } => {
-            push_tool_to_messages(messages, id, cx);
-        }
-        ThreadItem::FileChange { id, .. } => {
-            push_tool_to_messages(messages, id, cx);
-        }
-        ThreadItem::McpToolCall { id, .. } => {
-            push_tool_to_messages(messages, id, cx);
-        }
-        ThreadItem::DynamicToolCall { id, .. } => {
-            push_tool_to_messages(messages, id, cx);
-        }
-        _ => {}
-    }
-}
-
-pub(super) fn push_tool_to_messages(
-    messages: &mut Vec<Entity<MessageState>>,
-    tool_id: String,
-    cx: &mut Context<CodexGui>,
-) {
-    for message in messages.iter().rev() {
-        let is_assistant = matches!(message.read(cx).kind, HistoryEntryKind::Assistant);
-        if is_assistant {
-            return;
-        }
-    }
-
-    messages.push(cx.new(|_| {
-        MessageState::item(
-            HistoryKey::ToolGroup(tool_id),
-            HistoryEntryKind::ToolGroup,
-            None,
-            StreamState::Complete,
-        )
-    }));
-}
-
 pub(super) fn thread_status_label(status: &ThreadStatus) -> &'static str {
     match status {
         ThreadStatus::NotLoaded => "not loaded",
@@ -131,17 +57,6 @@ pub(super) fn thread_status_label(status: &ThreadStatus) -> &'static str {
         ThreadStatus::SystemError => "system error",
         ThreadStatus::Active { .. } => "active",
     }
-}
-
-pub(super) fn user_input_text(content: &[UserInput]) -> String {
-    content
-        .iter()
-        .filter_map(|input| match input {
-            UserInput::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 pub(super) fn should_start_thread_for_turn(

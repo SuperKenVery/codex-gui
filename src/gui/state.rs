@@ -1,10 +1,8 @@
-use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash as _, Hasher as _},
-    time::Instant,
-};
+use std::collections::HashMap;
 
-use codex_app_server_protocol::{FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn};
+use codex_app_server_protocol::{
+    FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn, TurnStatus,
+};
 use gpui::{AppContext, Context, Entity, SharedString};
 
 pub struct GuiState {
@@ -330,7 +328,8 @@ pub struct ChatState {
     pub title: SharedString,
     pub subtitle: SharedString,
     pub thread: Option<Thread>,
-    pub messages: Vec<Entity<MessageState>>,
+    pub notices: Vec<HistoryNotice>,
+    message_states: HashMap<String, MessageState>,
     item_locations: HashMap<String, ThreadItemLocation>,
 }
 
@@ -339,24 +338,20 @@ impl ChatState {
         id: String,
         title: SharedString,
         subtitle: SharedString,
-        messages: Vec<Entity<MessageState>>,
+        notices: Vec<HistoryNotice>,
     ) -> Self {
         Self {
             id,
             title,
             subtitle,
             thread: None,
-            messages,
+            notices,
+            message_states: HashMap::new(),
             item_locations: HashMap::new(),
         }
     }
 
-    pub fn from_thread(
-        thread: Thread,
-        title: SharedString,
-        subtitle: SharedString,
-        messages: Vec<Entity<MessageState>>,
-    ) -> Self {
+    pub fn from_thread(thread: Thread, title: SharedString, subtitle: SharedString) -> Self {
         let id = thread.id.clone();
         let item_locations = thread_item_locations(&thread);
         Self {
@@ -364,13 +359,21 @@ impl ChatState {
             title,
             subtitle,
             thread: Some(thread),
-            messages,
+            notices: Vec::new(),
+            message_states: HashMap::new(),
             item_locations,
         }
     }
 
-    pub fn append_message(&mut self, message: Entity<MessageState>) {
-        self.messages.push(message);
+    pub fn upsert_notice(&mut self, id: String, body: String) {
+        if let Some(notice) = self.notices.iter_mut().find(|notice| notice.id == id) {
+            notice.body = body.into();
+        } else {
+            self.notices.push(HistoryNotice {
+                id,
+                body: body.into(),
+            });
+        }
     }
 
     pub fn set_title(&mut self, title: String) {
@@ -387,6 +390,11 @@ impl ChatState {
     }
 
     pub fn upsert_turn(&mut self, turn: Turn) {
+        if !matches!(turn.status, TurnStatus::InProgress) {
+            for item in &turn.items {
+                self.message_states.remove(item.id());
+            }
+        }
         let Some(thread) = &mut self.thread else {
             return;
         };
@@ -402,15 +410,28 @@ impl ChatState {
         self.rebuild_item_locations();
     }
 
-    pub fn append_thread_item(&mut self, turn_id: Option<&str>, item: ThreadItem) {
+    pub fn start_item(&mut self, turn_id: &str, item: ThreadItem) {
+        let item_id = item.id().to_string();
+        self.message_states
+            .insert(item_id, MessageState::streaming());
+        self.upsert_thread_item(turn_id, item);
+    }
+
+    pub fn complete_item(&mut self, item: ThreadItem) {
+        let item_id = item.id().to_string();
+        self.replace_thread_item(item);
+        if let Some(state) = self.message_states.get_mut(&item_id) {
+            state.lifecycle = MessageLifecycle::Complete;
+        }
+    }
+
+    fn upsert_thread_item(&mut self, turn_id: &str, item: ThreadItem) {
         let Some(thread) = &mut self.thread else {
             return;
         };
         let item_id = item.id().to_string();
         let mut changed = false;
-        if let Some(turn_id) = turn_id
-            && let Some(turn) = thread.turns.iter_mut().find(|turn| turn.id == turn_id)
-        {
+        if let Some(turn) = thread.turns.iter_mut().find(|turn| turn.id == turn_id) {
             if let Some(existing) = turn
                 .items
                 .iter_mut()
@@ -496,91 +517,10 @@ impl ChatState {
         }
     }
 
-    pub fn item_for_state(&self, state: &MessageState) -> Option<&ThreadItem> {
-        match &state.key {
-            HistoryKey::Item(item_id) | HistoryKey::ToolGroup(item_id) => self.thread_item(item_id),
-            HistoryKey::Notice(_) => None,
-        }
-    }
-
-    pub fn has_done_tools_for_state(&self, state: &MessageState) -> bool {
-        let tools = self.tools_for_state(state);
-        !tools.is_empty() && tools.iter().all(|tool| tool_item_done(tool))
-    }
-
-    pub fn item_is_agent_message(&self, item_id: &str) -> bool {
-        matches!(
-            self.thread_item(item_id),
-            Some(ThreadItem::AgentMessage { .. })
-        )
-    }
-
-    pub fn message_has_tool(&self, state: &MessageState, item_id: &str) -> bool {
-        self.tools_for_state(state)
-            .iter()
-            .any(|tool| tool.id() == item_id)
-    }
-
-    pub fn tools_for_state(&self, state: &MessageState) -> Vec<&ThreadItem> {
-        match (&state.key, state.kind) {
-            (HistoryKey::Item(item_id), HistoryEntryKind::Assistant) => {
-                self.attached_tools_after(item_id)
-            }
-            (HistoryKey::ToolGroup(first_tool_id), HistoryEntryKind::ToolGroup) => {
-                self.tool_group_from(first_tool_id)
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn attached_tools_after(&self, item_id: &str) -> Vec<&ThreadItem> {
-        let Some((turn_index, item_index)) = self.thread_item_position(item_id) else {
-            return Vec::new();
-        };
-        self.thread
-            .as_ref()
-            .and_then(|thread| thread.turns.get(turn_index))
-            .map(|turn| {
-                turn.items
-                    .iter()
-                    .skip(item_index + 1)
-                    .take_while(|item| is_tool_item(item))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn tool_group_from(&self, first_tool_id: &str) -> Vec<&ThreadItem> {
-        let Some((turn_index, item_index)) = self.thread_item_position(first_tool_id) else {
-            return Vec::new();
-        };
-        self.thread
-            .as_ref()
-            .and_then(|thread| thread.turns.get(turn_index))
-            .map(|turn| {
-                turn.items
-                    .iter()
-                    .skip(item_index)
-                    .take_while(|item| is_tool_item(item))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn thread_item(&self, item_id: &str) -> Option<&ThreadItem> {
-        let location = self.item_locations.get(item_id)?;
-        self.thread
-            .as_ref()?
-            .turns
-            .get(location.turn_index)?
-            .items
-            .get(location.item_index)
-    }
-
-    fn thread_item_position(&self, item_id: &str) -> Option<(usize, usize)> {
-        self.item_locations
+    pub fn item_is_streaming(&self, item_id: &str) -> bool {
+        self.message_states
             .get(item_id)
-            .map(|location| (location.turn_index, location.item_index))
+            .is_some_and(MessageState::is_streaming)
     }
 
     fn thread_item_mut(&mut self, item_id: &str) -> Option<&mut ThreadItem> {
@@ -599,6 +539,34 @@ impl ChatState {
             .as_ref()
             .map(thread_item_locations)
             .unwrap_or_default();
+    }
+}
+
+#[derive(Clone)]
+pub struct HistoryNotice {
+    pub id: String,
+    pub body: SharedString,
+}
+
+/// Runtime lifecycle supplied by item notifications but absent from `ThreadItem`.
+pub struct MessageState {
+    lifecycle: MessageLifecycle,
+}
+
+enum MessageLifecycle {
+    Streaming,
+    Complete,
+}
+
+impl MessageState {
+    fn streaming() -> Self {
+        Self {
+            lifecycle: MessageLifecycle::Streaming,
+        }
+    }
+
+    fn is_streaming(&self) -> bool {
+        matches!(self.lifecycle, MessageLifecycle::Streaming)
     }
 }
 
@@ -622,145 +590,6 @@ fn thread_item_locations(thread: &Thread) -> HashMap<String, ThreadItemLocation>
         }
     }
     locations
-}
-
-pub struct MessageState {
-    pub key: HistoryKey,
-    pub kind: HistoryEntryKind,
-    pub rendered_body: String,
-    pub stream_state: StreamState,
-    pub created_at: Instant,
-    pub updated_at: Instant,
-    pub tools_expanded: bool,
-}
-
-impl MessageState {
-    pub fn notice(body: String) -> Self {
-        Self::new_with_key(
-            HistoryKey::Notice(format!("notice-{}", stable_text_id(&body))),
-            HistoryEntryKind::Notice,
-            Some(body),
-            StreamState::Complete,
-        )
-    }
-
-    pub fn item(
-        key: HistoryKey,
-        kind: HistoryEntryKind,
-        body: Option<String>,
-        stream_state: StreamState,
-    ) -> Self {
-        Self::new_with_key(key, kind, body, stream_state)
-    }
-
-    pub fn new_with_key(
-        key: HistoryKey,
-        kind: HistoryEntryKind,
-        body: Option<String>,
-        stream_state: StreamState,
-    ) -> Self {
-        let now = Instant::now();
-        let rendered_body = body.unwrap_or_default();
-        Self {
-            key,
-            kind,
-            rendered_body,
-            stream_state,
-            created_at: now,
-            updated_at: now,
-            tools_expanded: false,
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.updated_at = Instant::now();
-    }
-
-    pub fn toggle_tools(&mut self) {
-        self.tools_expanded = !self.tools_expanded;
-        self.touch();
-    }
-
-    pub fn mark_streaming(&mut self) {
-        self.stream_state = StreamState::Streaming;
-        self.touch();
-    }
-
-    pub fn mark_complete(&mut self) {
-        self.stream_state = StreamState::Complete;
-        self.touch();
-    }
-
-    pub fn set_body(&mut self, body: String) {
-        self.rendered_body = body;
-    }
-
-    pub fn append_body_delta(&mut self, delta: &str) {
-        if delta.is_empty() {
-            return;
-        }
-
-        self.rendered_body.push_str(delta);
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum HistoryKey {
-    Item(String),
-    ToolGroup(String),
-    Notice(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum HistoryEntryKind {
-    User,
-    Assistant,
-    ToolGroup,
-    Notice,
-}
-
-fn stable_text_id(text: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-#[derive(Clone, Copy)]
-pub enum StreamState {
-    Complete,
-    Streaming,
-}
-
-fn is_tool_item(item: &ThreadItem) -> bool {
-    match item {
-        ThreadItem::CommandExecution { .. }
-        | ThreadItem::FileChange { .. }
-        | ThreadItem::McpToolCall { .. }
-        | ThreadItem::DynamicToolCall { .. } => true,
-        _ => false,
-    }
-}
-
-fn tool_item_done(item: &ThreadItem) -> bool {
-    match item {
-        ThreadItem::CommandExecution { status, .. } => !matches!(
-            status,
-            codex_app_server_protocol::CommandExecutionStatus::InProgress
-        ),
-        ThreadItem::FileChange { status, .. } => !matches!(
-            status,
-            codex_app_server_protocol::PatchApplyStatus::InProgress
-        ),
-        ThreadItem::McpToolCall { status, .. } => !matches!(
-            status,
-            codex_app_server_protocol::McpToolCallStatus::InProgress
-        ),
-        ThreadItem::DynamicToolCall { status, .. } => !matches!(
-            status,
-            codex_app_server_protocol::DynamicToolCallStatus::InProgress
-        ),
-        _ => false,
-    }
 }
 
 pub struct UiState {

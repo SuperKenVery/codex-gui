@@ -1,8 +1,6 @@
 use super::{CodexGui, thread_mapping::*};
 use crate::bridge::BridgeEvent;
-use crate::gui::{
-    ChatState, HistoryEntryKind, HistoryKey, MessageState, ProjectState, StreamState,
-};
+use crate::gui::{ChatState, HistoryNotice, ProjectState};
 use codex_app_server_protocol::{ServerNotification, Thread, ThreadItem};
 use gpui::{AppContext, Context, Entity};
 
@@ -49,8 +47,7 @@ impl CodexGui {
                 });
             }
             ServerNotification::ItemStarted(params) => {
-                self.append_thread_item_data(&params.thread_id, params.item.clone(), cx);
-                self.apply_item_started(&params.thread_id, params.item, cx);
+                self.start_thread_item(&params.thread_id, &params.turn_id, params.item, cx);
             }
             ServerNotification::AgentMessageDelta(params) => {
                 self.append_thread_agent_delta(
@@ -59,7 +56,6 @@ impl CodexGui {
                     &params.delta,
                     cx,
                 );
-                self.append_agent_delta(&params.thread_id, &params.item_id, &params.delta, cx);
             }
             ServerNotification::CommandExecutionOutputDelta(params) => {
                 self.append_thread_command_output_delta(
@@ -68,7 +64,6 @@ impl CodexGui {
                     &params.delta,
                     cx,
                 );
-                self.touch_tool_message(&params.thread_id, &params.item_id, cx);
             }
             ServerNotification::FileChangeOutputDelta(params) => {
                 self.append_thread_file_change_output_delta(
@@ -77,7 +72,6 @@ impl CodexGui {
                     &params.delta,
                     cx,
                 );
-                self.touch_tool_message(&params.thread_id, &params.item_id, cx);
             }
             ServerNotification::FileChangePatchUpdated(params) => {
                 self.update_thread_file_change_item(
@@ -86,11 +80,9 @@ impl CodexGui {
                     params.changes.clone(),
                     cx,
                 );
-                self.touch_tool_message(&params.thread_id, &params.item_id, cx);
             }
             ServerNotification::ItemCompleted(params) => {
-                self.replace_thread_item_data(&params.thread_id, params.item.clone(), cx);
-                self.apply_item_completed(&params.thread_id, params.item, cx);
+                self.complete_thread_item(&params.thread_id, params.item, cx);
             }
             ServerNotification::ThreadStatusChanged(params) => {
                 self.update_thread_status(&params.thread_id, params.status.clone(), cx);
@@ -109,8 +101,6 @@ impl CodexGui {
                     state.finish_turn(&thread_id, &turn_id);
                     cx.notify();
                 });
-                self.finish_completed_tool_messages(&thread_id, cx);
-                self.notify_chat(&thread_id, cx);
                 tracing::info!(thread_id, turn_id, "turn complete");
             }
             ServerNotification::Error(params) => {
@@ -212,12 +202,15 @@ impl CodexGui {
             let thread_id = chat.read(cx).id.clone();
             self.append_notice(&thread_id, message, cx);
         } else if let Some(project) = self.active_project_entity(cx) {
-            let chat = cx.new(|cx| {
+            let chat = cx.new(|_| {
                 ChatState::new(
                     "bridge-error".into(),
                     "Bridge error".into(),
                     message.clone().into(),
-                    vec![cx.new(|_| MessageState::notice(message))],
+                    vec![HistoryNotice {
+                        id: "bridge-error".into(),
+                        body: message.into(),
+                    }],
                 )
             });
             project.update(cx, |project, cx| {
@@ -225,71 +218,6 @@ impl CodexGui {
                 cx.notify();
             });
         }
-    }
-
-    fn apply_item_started(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
-        match item {
-            ThreadItem::UserMessage { id, content, .. } => {
-                let text = user_input_text(&content);
-                if !text.is_empty() {
-                    self.append_message_state(
-                        thread_id,
-                        HistoryKey::Item(id),
-                        HistoryEntryKind::User,
-                        None,
-                        StreamState::Complete,
-                        cx,
-                    );
-                }
-            }
-            ThreadItem::AgentMessage { id, text, .. } => {
-                self.finish_completed_tool_messages(thread_id, cx);
-                self.append_message_state(
-                    thread_id,
-                    HistoryKey::Item(id),
-                    HistoryEntryKind::Assistant,
-                    Some(text),
-                    StreamState::Streaming,
-                    cx,
-                );
-            }
-            ThreadItem::CommandExecution { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-            }
-            ThreadItem::FileChange { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-            }
-            ThreadItem::McpToolCall { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-            }
-            ThreadItem::DynamicToolCall { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-            }
-            _ => {}
-        }
-    }
-
-    fn apply_item_completed(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
-        match item {
-            ThreadItem::CommandExecution { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-                self.mark_item_complete(thread_id, &id, cx);
-            }
-            ThreadItem::FileChange { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-                self.mark_item_complete(thread_id, &id, cx);
-            }
-            ThreadItem::McpToolCall { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-                self.mark_item_complete(thread_id, &id, cx);
-            }
-            ThreadItem::DynamicToolCall { id, .. } => {
-                self.append_or_update_tool(thread_id, &id, cx);
-                self.mark_item_complete(thread_id, &id, cx);
-            }
-            item => self.mark_item_complete(thread_id, item.id(), cx),
-        }
-        self.notify_chat(thread_id, cx);
     }
 
     pub(super) fn active_project_entity(
@@ -360,51 +288,12 @@ impl CodexGui {
         None
     }
 
-    fn notify_chat(&self, thread_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
-            return;
-        };
-        chat.update(cx, |_, cx| cx.notify());
-    }
-
     fn append_notice(&self, thread_id: &str, body: String, cx: &mut Context<Self>) {
-        let key = HistoryKey::Notice(format!("notice-{thread_id}"));
-        self.append_message_state(
-            thread_id,
-            key,
-            HistoryEntryKind::Notice,
-            Some(body),
-            StreamState::Complete,
-            cx,
-        );
-    }
-
-    fn append_message_state(
-        &self,
-        thread_id: &str,
-        key: HistoryKey,
-        kind: HistoryEntryKind,
-        body: Option<String>,
-        stream_state: StreamState,
-        cx: &mut Context<Self>,
-    ) {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        if let Some(existing) = self.find_message_by_key(thread_id, &key, cx) {
-            existing.update(cx, |message, cx| {
-                message.stream_state = stream_state;
-                if let Some(body) = body {
-                    message.set_body(body);
-                }
-                message.touch();
-                cx.notify();
-            });
-            return;
-        }
-        let message = cx.new(|_| MessageState::item(key, kind, body, stream_state));
         chat.update(cx, |chat, cx| {
-            chat.append_message(message);
+            chat.upsert_notice(format!("notice-{thread_id}"), body);
             cx.notify();
         });
     }
@@ -434,29 +323,28 @@ impl CodexGui {
         });
     }
 
-    fn append_thread_item_data(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
-        let active_turn_id = self
-            .ui_state
-            .read(cx)
-            .active_turn
-            .as_ref()
-            .filter(|active_turn| active_turn.thread_id == thread_id)
-            .map(|active_turn| active_turn.turn_id.clone());
+    fn start_thread_item(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        item: ThreadItem,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
         chat.update(cx, |chat, cx| {
-            chat.append_thread_item(active_turn_id.as_deref(), item);
+            chat.start_item(turn_id, item);
             cx.notify();
         });
     }
 
-    fn replace_thread_item_data(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
+    fn complete_thread_item(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
         chat.update(cx, |chat, cx| {
-            chat.replace_thread_item(item);
+            chat.complete_item(item);
             cx.notify();
         });
     }
@@ -471,8 +359,9 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, _| {
+        chat.update(cx, |chat, cx| {
             chat.append_agent_text_delta(item_id, delta);
+            cx.notify();
         });
     }
 
@@ -486,8 +375,9 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, _| {
+        chat.update(cx, |chat, cx| {
             chat.append_command_output_delta(item_id, delta);
+            cx.notify();
         });
     }
 
@@ -501,8 +391,9 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, _| {
+        chat.update(cx, |chat, cx| {
             chat.append_file_change_output_delta(item_id, delta);
+            cx.notify();
         });
     }
 
@@ -516,8 +407,9 @@ impl CodexGui {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
-        chat.update(cx, |chat, _| {
+        chat.update(cx, |chat, cx| {
             chat.update_file_change_item(item_id, changes);
+            cx.notify();
         });
     }
 
@@ -534,166 +426,5 @@ impl CodexGui {
             chat.set_thread_status(status);
             cx.notify();
         });
-    }
-
-    fn append_agent_delta(
-        &self,
-        thread_id: &str,
-        item_id: &str,
-        delta: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(message) = self.find_assistant_message(thread_id, item_id, cx) else {
-            self.append_message_state(
-                thread_id,
-                HistoryKey::Item(item_id.to_string()),
-                HistoryEntryKind::Assistant,
-                Some(delta.to_string()),
-                StreamState::Streaming,
-                cx,
-            );
-            return;
-        };
-        message.update(cx, |message, cx| {
-            message.mark_streaming();
-            message.append_body_delta(delta);
-            cx.notify();
-        });
-    }
-
-    fn append_or_update_tool(&self, thread_id: &str, tool_id: &str, cx: &mut Context<Self>) {
-        if let Some(message) = self.find_latest_streaming_assistant_message(thread_id, cx) {
-            message.update(cx, |message, cx| {
-                message.touch();
-                cx.notify();
-            });
-        } else if let Some(message) = self.find_tool_message(thread_id, tool_id, cx) {
-            message.update(cx, |message, cx| {
-                message.mark_streaming();
-                cx.notify();
-            });
-        } else {
-            self.append_message_state(
-                thread_id,
-                HistoryKey::ToolGroup(tool_id.to_string()),
-                HistoryEntryKind::ToolGroup,
-                None,
-                StreamState::Streaming,
-                cx,
-            );
-        }
-    }
-
-    fn finish_completed_tool_messages(&self, thread_id: &str, cx: &mut Context<Self>) {
-        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
-            return;
-        };
-        let messages = chat.read(cx).messages.clone();
-        for message in messages {
-            message.update(cx, |message, cx| {
-                if !matches!(message.stream_state, StreamState::Streaming)
-                    || !message.rendered_body.is_empty()
-                    || !chat.read(cx).has_done_tools_for_state(message)
-                {
-                    return;
-                }
-                message.mark_complete();
-                cx.notify();
-            });
-        }
-    }
-
-    fn touch_tool_message(&self, thread_id: &str, item_id: &str, cx: &mut Context<Self>) {
-        let Some(message) = self.find_tool_message(thread_id, item_id, cx) else {
-            return;
-        };
-        message.update(cx, |message, cx| {
-            message.touch();
-            cx.notify();
-        });
-    }
-
-    fn mark_item_complete(&self, thread_id: &str, item_id: &str, cx: &mut Context<Self>) {
-        if let Some(message) = self.find_assistant_message(thread_id, item_id, cx) {
-            message.update(cx, |message, cx| {
-                message.mark_complete();
-                cx.notify();
-            });
-            return;
-        }
-
-        if let Some(message) = self.find_tool_message(thread_id, item_id, cx) {
-            let tools_done = self
-                .find_chat_entity(thread_id, cx)
-                .map(|chat| chat.read(cx).has_done_tools_for_state(&message.read(cx)))
-                .unwrap_or(false);
-            message.update(cx, |message, cx| {
-                if tools_done {
-                    message.mark_complete();
-                } else {
-                    message.touch();
-                }
-                cx.notify();
-            });
-        }
-    }
-
-    fn find_message_by_key(
-        &self,
-        thread_id: &str,
-        key: &HistoryKey,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<MessageState>> {
-        let chat = self.find_chat_entity(thread_id, cx)?;
-        let messages = chat.read(cx).messages.clone();
-        messages
-            .into_iter()
-            .rev()
-            .find(|message| &message.read(cx).key == key)
-    }
-
-    fn find_assistant_message(
-        &self,
-        thread_id: &str,
-        item_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<MessageState>> {
-        let chat = self.find_chat_entity(thread_id, cx)?;
-        let messages = chat.read(cx).messages.clone();
-        messages.into_iter().rev().find(|message| {
-            message.read(cx).key == HistoryKey::Item(item_id.to_string())
-                && chat.read(cx).item_is_agent_message(item_id)
-        })
-    }
-
-    fn find_latest_streaming_assistant_message(
-        &self,
-        thread_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<MessageState>> {
-        let chat = self.find_chat_entity(thread_id, cx)?;
-        let messages = chat.read(cx).messages.clone();
-        messages.into_iter().rev().find(|message| {
-            let message = message.read(cx);
-            matches!(message.stream_state, StreamState::Streaming)
-                && matches!(
-                    &message.key,
-                    HistoryKey::Item(item_id) if chat.read(cx).item_is_agent_message(item_id)
-                )
-        })
-    }
-
-    fn find_tool_message(
-        &self,
-        thread_id: &str,
-        item_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<MessageState>> {
-        let chat = self.find_chat_entity(thread_id, cx)?;
-        let messages = chat.read(cx).messages.clone();
-        messages
-            .into_iter()
-            .rev()
-            .find(|message| chat.read(cx).message_has_tool(&message.read(cx), item_id))
     }
 }

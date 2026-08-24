@@ -1,80 +1,31 @@
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash as _, Hasher as _},
+    collections::HashMap,
     sync::{Arc, RwLock},
-    time::Duration,
 };
 
-use gpui::{App, Entity, EntityId, IntoElement, SharedString, WeakEntity, Window, div};
+use gpui::{App, IntoElement, WeakEntity, Window, div};
 use gpui_component::text::{
     MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast,
 };
 
-use super::{HistoryKey, MessageState, chat_history::ChatHistory, widgets::ToolCallView};
+use super::{
+    blocks::{self, BlockId, HistoryBlock},
+    view::ChatHistory,
+};
 
 const BLOCK_TAG: &str = "CodexTranscriptBlock";
 
-pub(super) type TranscriptBlockStore = Arc<RwLock<HashMap<String, TranscriptBlockTarget>>>;
+pub(super) type TranscriptBlockStore = Arc<RwLock<HashMap<BlockId, HistoryBlock>>>;
 
-#[derive(Clone)]
-pub(super) enum TranscriptBlockTarget {
-    User {
-        key: HistoryKey,
-        body: SharedString,
-    },
-    AssistantHeader {
-        key: HistoryKey,
-        label: &'static str,
-    },
-    Tools {
-        key: HistoryKey,
-        message: Entity<MessageState>,
-        tools: Arc<[ToolCallView]>,
-        expanded: bool,
-        collapse: bool,
-        active_tail: bool,
-    },
-    WorkedSummary {
-        turn_id: EntityId,
-        duration: Duration,
-        expanded: bool,
-    },
+pub(super) struct TranscriptSnapshot {
+    pub markdown: String,
+    pub blocks: HashMap<BlockId, HistoryBlock>,
 }
 
-impl TranscriptBlockTarget {
-    fn id(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        match self {
-            Self::User { key, .. } => {
-                "user".hash(&mut hasher);
-                key.hash(&mut hasher);
-            }
-            Self::AssistantHeader { key, .. } => {
-                "assistant-header".hash(&mut hasher);
-                key.hash(&mut hasher);
-            }
-            Self::Tools { key, .. } => {
-                "tools".hash(&mut hasher);
-                key.hash(&mut hasher);
-            }
-            Self::WorkedSummary { turn_id, .. } => {
-                "worked-summary".hash(&mut hasher);
-                turn_id.hash(&mut hasher);
-            }
-        }
-        format!("block-{:016x}", hasher.finish())
-    }
-}
-
-pub(super) struct TranscriptDocument {
-    pub source: String,
-    pub blocks: HashMap<String, TranscriptBlockTarget>,
-}
-
-impl TranscriptDocument {
+impl TranscriptSnapshot {
     pub fn new() -> Self {
         Self {
-            source: String::new(),
+            markdown: String::new(),
             blocks: HashMap::new(),
         }
     }
@@ -84,20 +35,20 @@ impl TranscriptDocument {
             return;
         }
         self.push_separator();
-        self.source.push_str(markdown);
+        self.markdown.push_str(markdown);
     }
 
-    pub fn push_block(&mut self, target: TranscriptBlockTarget) {
-        let id = target.id();
+    pub fn push_block(&mut self, block: HistoryBlock) {
+        let id = block.id();
         self.push_separator();
-        self.source
+        self.markdown
             .push_str(&format!(r#"<{BLOCK_TAG} id="{id}" />"#));
-        self.blocks.insert(id, target);
+        self.blocks.insert(id, block);
     }
 
     fn push_separator(&mut self) {
-        if !self.source.is_empty() {
-            self.source.push_str("\n\n");
+        if !self.markdown.is_empty() {
+            self.markdown.push_str("\n\n");
         }
     }
 }
@@ -120,7 +71,7 @@ impl TranscriptPlugin {
 
 #[derive(Clone)]
 struct TranscriptNode {
-    id: String,
+    id: BlockId,
 }
 
 impl MarkdownPlugin for TranscriptPlugin {
@@ -143,7 +94,7 @@ impl MarkdownPlugin for TranscriptPlugin {
         if html_tag_name(&raw.value) != Some(BLOCK_TAG) {
             return None;
         }
-        let id = html_attr(&raw.value, "id")?;
+        let id = BlockId::from_marker(html_attr(&raw.value, "id")?);
         if !self
             .blocks
             .read()
@@ -160,14 +111,12 @@ impl MarkdownPlugin for TranscriptPlugin {
     }
 
     fn render(&self, node: &MarkdownNode, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let target = node
+        let block = node
             .data::<TranscriptNode>()
             .and_then(|node| self.blocks.read().ok()?.get(&node.id).cloned());
 
-        target
-            .map(|target| {
-                super::chat_history::render_transcript_block(&self.history, target, window, cx)
-            })
+        block
+            .map(|block| blocks::render(&self.history, block, window, cx))
             .unwrap_or_else(|| div().into_any_element())
     }
 }
@@ -193,43 +142,41 @@ mod tests {
 
     #[test]
     fn streaming_markdown_is_a_strict_source_append() {
-        let mut before = TranscriptDocument::new();
-        before.push_block(TranscriptBlockTarget::User {
-            key: HistoryKey::Item("user-1".into()),
+        let mut before = TranscriptSnapshot::new();
+        before.push_block(HistoryBlock::User {
+            key: "user-1".into(),
             body: "hello".into(),
         });
         before.push_markdown("A partial reply");
 
-        let mut after = TranscriptDocument::new();
-        after.push_block(TranscriptBlockTarget::User {
-            key: HistoryKey::Item("user-1".into()),
+        let mut after = TranscriptSnapshot::new();
+        after.push_block(HistoryBlock::User {
+            key: "user-1".into(),
             body: "hello".into(),
         });
         after.push_markdown("A partial reply with another chunk");
 
         assert_eq!(
-            after.source.strip_prefix(&before.source),
+            after.markdown.strip_prefix(&before.markdown),
             Some(" with another chunk")
         );
     }
 
     #[test]
     fn dynamic_block_state_does_not_change_the_source_marker() {
-        let key = HistoryKey::Item("assistant-1".into());
-
-        let mut before = TranscriptDocument::new();
-        before.push_block(TranscriptBlockTarget::AssistantHeader {
-            key: key.clone(),
+        let mut before = TranscriptSnapshot::new();
+        before.push_block(HistoryBlock::AssistantHeader {
+            key: "assistant-1".into(),
             label: "Codex is working",
         });
 
-        let mut after = TranscriptDocument::new();
-        after.push_block(TranscriptBlockTarget::AssistantHeader {
-            key,
+        let mut after = TranscriptSnapshot::new();
+        after.push_block(HistoryBlock::AssistantHeader {
+            key: "assistant-1".into(),
             label: "Codex",
         });
 
-        assert_eq!(after.source, before.source);
+        assert_eq!(after.markdown, before.markdown);
     }
 
     #[test]
