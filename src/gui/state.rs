@@ -5,6 +5,15 @@ use codex_app_server_protocol::{
 };
 use gpui::{AppContext, Context, Entity, SharedString};
 
+pub(crate) fn single_line_title(title: &str) -> String {
+    title
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub struct GuiState {
     pub projects: Vec<Entity<ProjectState>>,
     pub projectless_chats: Vec<Entity<ChatState>>,
@@ -380,7 +389,7 @@ impl ChatState {
         if let Some(thread) = &mut self.thread {
             thread.name = Some(title.clone());
         }
-        self.title = title.into();
+        self.title = single_line_title(&title).into();
     }
 
     pub fn set_thread_status(&mut self, status: ThreadStatus) {

@@ -13,3 +13,4 @@ pub use state::{
     ApprovalReviewerMode, ChatSettings, ChatState, GuiState, HistoryNotice, ModelOption,
     PermissionMode, PermissionProfileOption, ProjectState, UiState, permission_profile_label,
 };
+pub(crate) use state::single_line_title;

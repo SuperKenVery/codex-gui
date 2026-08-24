@@ -1,5 +1,5 @@
 use super::CodexGui;
-use crate::gui::{ChatState, HistoryNotice};
+use crate::gui::{ChatState, HistoryNotice, single_line_title};
 use codex_app_server_protocol::{Thread, ThreadStatus};
 use gpui::{AppContext, Context, Entity};
 use std::path::Path;
@@ -18,13 +18,14 @@ pub(super) fn chat_entity_from_thread(
 }
 
 pub(super) fn thread_title(name: Option<&str>, preview: &str) -> String {
-    name.filter(|name| !name.trim().is_empty())
+    let title = name
+        .filter(|name| !name.trim().is_empty())
         .or_else(|| {
             let preview = preview.trim();
             (!preview.is_empty()).then_some(preview)
         })
-        .unwrap_or("Untitled Codex thread")
-        .to_string()
+        .unwrap_or("Untitled Codex thread");
+    single_line_title(title)
 }
 
 pub(super) fn empty_chat_entity(cx: &mut Context<CodexGui>) -> Entity<ChatState> {
@@ -102,6 +103,14 @@ mod tests {
     #[test]
     fn thread_title_falls_back_to_preview() {
         assert_eq!(thread_title(None, "  First prompt  "), "First prompt");
+    }
+
+    #[test]
+    fn thread_title_removes_all_line_breaks() {
+        assert_eq!(
+            thread_title(None, " First line\nSecond line\r\nThird line\rFourth line "),
+            "First line Second line Third line Fourth line"
+        );
     }
 
     #[test]

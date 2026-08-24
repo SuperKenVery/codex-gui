@@ -17,8 +17,7 @@ pub(super) fn render_user(body: SharedString, theme: &Theme) -> gpui::Div {
         .min_w_0()
         .overflow_x_hidden()
         .py_2()
-        // .flex()
-        .flex_col()
+        .flex()
         .justify_end()
         .child(
             div()
@@ -35,5 +34,4 @@ pub(super) fn render_user(body: SharedString, theme: &Theme) -> gpui::Div {
                 .whitespace_normal()
                 .child(body),
         )
-        .child(div().flex_row())
 }
