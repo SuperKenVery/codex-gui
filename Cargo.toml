@@ -11,8 +11,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
     "wayland",
     "x11",
 ] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", branch = "main" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", branch = "main" }
+gpui-component = { path = "vendor/gpui-component/crates/ui" }
+gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
 ratex-layout = "0.1.14"
 ratex-parser = "0.1.14"
 ratex-svg = { version = "0.1.14", features = ["embed-fonts"] }
