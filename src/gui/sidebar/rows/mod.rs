@@ -12,7 +12,7 @@ use gpui_component::{
 
 use super::{SIDEBAR_ROW_GAP, SIDEBAR_ROW_HEIGHT, Sidebar};
 use crate::gui::{ChatState, ProjectState};
-pub(super) use model::{PaginateKind, SidebarRow, build_sidebar_rows};
+pub(super) use model::{PaginateKind, SidebarRow, SidebarRowDisplayStatus};
 
 /// The base button style shared by all interactive sidebar rows
 /// (project folders and chat threads).

@@ -54,6 +54,27 @@ When handling app-server events:
 
 Loaded threads and live threads must converge on the same `ChatState` representation. Account for `Thread.turns` being empty on responses that do not include turns and for `Turn.items_view` being partial.
 
+## Sidebar list state
+
+The sidebar is a lazy projection of canonical `GuiState` plus sidebar-owned view state such as collapsed projects and pagination limits:
+
+```text
+GuiState + sidebar view state
+              ↓
+   SidebarRowDisplayStatus
+              ↓ row_at(index)
+         SidebarRow
+              ↓
+       GPUI list renderer
+```
+
+- `SidebarRowDisplayStatus` is constant-size layout/index metadata, not a materialized row collection. Keep `row_at(index)` lazy; do not rebuild a `Vec<SidebarRow>` during render or pagination.
+- `ListState` stores virtual slots, measurements, focus metadata, and scroll position; it does not own sidebar data. Keep `ListState::item_count()` equal to `SidebarRowDisplayStatus::len()`.
+- Structural changes must go through the sidebar's explicit `insert_rows`, `remove_rows`, or `replace_rows` operations, which use `ListState::splice`. Do not reset `ListState` from `Render` when the item count changes.
+- Pagination inserts newly exposed slots before the existing pager, or replaces the final pager with those slots. Folding and expansion insert or remove only the active project's child range.
+- Model-driven notifications reconcile constant-size display metadata and apply structural operations without scanning all visible rows. Observe the active `ProjectState` as well as `GuiState`, because its chat count contributes to the projection.
+- `SidebarRow` may carry generic project/chat values; the production renderer specializes them to `Entity<ProjectState>` and `Entity<ChatState>` so each projected row is independently renderable.
+
 ## Chat history rendering
 
 Chat history uses this pipeline:

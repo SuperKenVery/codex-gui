@@ -1,147 +1,355 @@
-use std::collections::HashSet;
+use std::ops::Range;
 
-/// A flattened row in the sidebar list.
+/// A row produced lazily from the sidebar's canonical and view state.
 #[derive(Clone, Debug)]
 pub enum SidebarRow<Project, Chat> {
-    /// "Projects" or "Chats" label
+    /// "Projects" or "Chats" label.
     SectionHeader { label: &'static str },
-    /// Project folder that contains chats in it
+    /// Project folder that contains chats in it.
     Project {
         project_index: usize,
         project: Project,
         selected: bool,
         expanded: bool,
     },
-    /// A thread with a user-specified project dir
+    /// A thread with a user-specified project dir.
     Chat {
         project_index: usize,
         chat_index: usize,
         chat: Chat,
         selected: bool,
     },
-    /// A project-less chat
+    /// A project-less chat.
     ProjectlessChat {
         chat_index: usize,
         chat: Chat,
         selected: bool,
     },
-    /// Show more/show all button
+    /// Show more/show all button.
     ShowMore { kind: PaginateKind },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaginateKind {
     Projects,
     ProjectlessChats,
     ProjectChats { path: String },
 }
 
-pub fn build_sidebar_rows<Project: Clone, Chat: Clone>(
-    projects: &[Project],
-    visible_project_count: usize,
-    projectless_chats: &[Chat],
-    visible_projectless_count: usize,
-    active_project: usize,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExpandedProject {
+    project_index: usize,
+    path: String,
     active_chat: usize,
+    chat_count: usize,
+    visible_chat_count: usize,
+}
+
+impl ExpandedProject {
+    fn has_pager(&self) -> bool {
+        self.chat_count > self.visible_chat_count
+    }
+
+    fn child_count(&self) -> usize {
+        self.visible_chat_count + usize::from(self.has_pager())
+    }
+}
+
+/// Lightweight, lazily indexed projection of `GuiState + Sidebar` view state.
+///
+/// This stores only counts and offsets. It does not materialize one value per
+/// sidebar row; [`Self::row_at`] creates a row only when GPUI asks to render it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarRowDisplayStatus {
+    project_count: usize,
+    visible_project_count: usize,
+    projectless_chat_count: usize,
+    visible_projectless_chat_count: usize,
+    active_project: usize,
     active_projectless_chat: Option<usize>,
-    active_project_path: Option<&str>,
-    active_project_chats: &[Chat],
-    visible_project_chat_count: usize,
-    collapsed_projects: &HashSet<String>,
-) -> Vec<SidebarRow<Project, Chat>> {
-    let mut rows = Vec::with_capacity(projects.len() + projectless_chats.len() + 6);
+    expanded_project: Option<ExpandedProject>,
+}
 
-    if !projects.is_empty() {
-        rows.push(SidebarRow::SectionHeader { label: "Projects" });
-        for (project_index, project) in projects.iter().take(visible_project_count).enumerate() {
-            let selected = project_index == active_project && active_projectless_chat.is_none();
-            let expanded = selected
-                && active_project_path.is_some_and(|path| !collapsed_projects.contains(path));
-            rows.push(SidebarRow::Project {
-                project_index,
-                project: project.clone(),
-                selected,
-                expanded,
-            });
+impl SidebarRowDisplayStatus {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        project_count: usize,
+        visible_project_count: usize,
+        projectless_chat_count: usize,
+        visible_projectless_chat_count: usize,
+        active_project: usize,
+        active_chat: usize,
+        active_projectless_chat: Option<usize>,
+        active_project_path: Option<String>,
+        active_project_chat_count: usize,
+        visible_project_chat_count: usize,
+        active_project_collapsed: bool,
+    ) -> Self {
+        let visible_project_count = visible_project_count.min(project_count);
+        let visible_projectless_chat_count =
+            visible_projectless_chat_count.min(projectless_chat_count);
+        let expanded_project = if active_project < visible_project_count
+            && active_projectless_chat.is_none()
+            && !active_project_collapsed
+        {
+            active_project_path.map(|path| ExpandedProject {
+                project_index: active_project,
+                path,
+                active_chat,
+                chat_count: active_project_chat_count,
+                visible_chat_count: visible_project_chat_count.min(active_project_chat_count),
+            })
+        } else {
+            None
+        };
 
-            if !expanded {
-                continue;
+        Self {
+            project_count,
+            visible_project_count,
+            projectless_chat_count,
+            visible_projectless_chat_count,
+            active_project,
+            active_projectless_chat,
+            expanded_project,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.project_section_len() + self.projectless_section_len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn active_project(&self) -> usize {
+        self.active_project
+    }
+
+    pub fn active_project_row(&self) -> Option<usize> {
+        (self.project_count > 0 && self.active_project < self.visible_project_count)
+            .then_some(1 + self.active_project)
+    }
+
+    pub fn project_section_len(&self) -> usize {
+        if self.project_count == 0 {
+            return 0;
+        }
+        1 + self.project_body_len() + usize::from(self.has_project_pager())
+    }
+
+    pub fn project_base_len(&self) -> usize {
+        self.project_section_len()
+            - self
+                .expanded_children_range()
+                .map_or(0, |range| range.len())
+    }
+
+    pub fn projectless_section_len(&self) -> usize {
+        if self.projectless_chat_count == 0 {
+            return 0;
+        }
+        1 + self.visible_projectless_chat_count + usize::from(self.has_projectless_pager())
+    }
+
+    pub fn expanded_children_range(&self) -> Option<Range<usize>> {
+        let expanded = self.expanded_project.as_ref()?;
+        let start = 1 + expanded.project_index + 1;
+        Some(start..start + expanded.child_count())
+    }
+
+    pub fn has_same_expanded_structure(&self, other: &Self) -> bool {
+        match (&self.expanded_project, &other.expanded_project) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                left.project_index == right.project_index
+                    && left.path == right.path
+                    && left.visible_chat_count == right.visible_chat_count
+                    && left.has_pager() == right.has_pager()
             }
+            _ => false,
+        }
+    }
 
-            let path = active_project_path.expect("an expanded project always has a path");
-            rows.extend(
-                active_project_chats
-                    .iter()
-                    .take(visible_project_chat_count)
-                    .enumerate()
-                    .map(|(chat_index, chat)| SidebarRow::Chat {
-                        project_index,
-                        chat_index,
-                        chat: chat.clone(),
-                        selected: chat_index == active_chat,
-                    }),
-            );
-            if active_project_chats.len() > visible_project_chat_count {
-                rows.push(SidebarRow::ShowMore {
-                    kind: PaginateKind::ProjectChats {
-                        path: path.to_owned(),
-                    },
+    pub fn pagination_pager_index(&self, kind: &PaginateKind) -> Option<usize> {
+        match kind {
+            PaginateKind::Projects => self
+                .has_project_pager()
+                .then_some(1 + self.project_body_len()),
+            PaginateKind::ProjectlessChats => self
+                .has_projectless_pager()
+                .then_some(self.project_section_len() + 1 + self.visible_projectless_chat_count),
+            PaginateKind::ProjectChats { path } => {
+                let expanded = self.expanded_project.as_ref()?;
+                (expanded.path == *path && expanded.has_pager())
+                    .then_some(1 + expanded.project_index + 1 + expanded.visible_chat_count)
+            }
+        }
+    }
+
+    pub fn pagination_body_len(&self, kind: &PaginateKind) -> Option<usize> {
+        match kind {
+            PaginateKind::Projects => Some(self.project_body_len()),
+            PaginateKind::ProjectlessChats => Some(self.visible_projectless_chat_count),
+            PaginateKind::ProjectChats { path } => self
+                .expanded_project
+                .as_ref()
+                .filter(|expanded| expanded.path == *path)
+                .map(|expanded| expanded.visible_chat_count),
+        }
+    }
+
+    pub fn row_at<Project: Clone, Chat: Clone>(
+        &self,
+        index: usize,
+        projects: &[Project],
+        projectless_chats: &[Chat],
+        active_project_chats: &[Chat],
+    ) -> Option<SidebarRow<Project, Chat>> {
+        if index >= self.len() {
+            return None;
+        }
+
+        if index < self.project_section_len() {
+            return self.project_row(index, projects, active_project_chats);
+        }
+
+        let section_index = index - self.project_section_len();
+        if section_index == 0 {
+            return Some(SidebarRow::SectionHeader { label: "Chats" });
+        }
+        let chat_index = section_index - 1;
+        if chat_index < self.visible_projectless_chat_count {
+            return projectless_chats.get(chat_index).cloned().map(|chat| {
+                SidebarRow::ProjectlessChat {
+                    chat_index,
+                    chat,
+                    selected: self.active_projectless_chat == Some(chat_index),
+                }
+            });
+        }
+        self.has_projectless_pager()
+            .then_some(SidebarRow::ShowMore {
+                kind: PaginateKind::ProjectlessChats,
+            })
+    }
+
+    fn project_row<Project: Clone, Chat: Clone>(
+        &self,
+        index: usize,
+        projects: &[Project],
+        active_project_chats: &[Chat],
+    ) -> Option<SidebarRow<Project, Chat>> {
+        if index == 0 {
+            return Some(SidebarRow::SectionHeader { label: "Projects" });
+        }
+
+        let child_range = self.expanded_children_range();
+        if let (Some(expanded), Some(child_range)) = (&self.expanded_project, &child_range)
+            && child_range.contains(&index)
+        {
+            let child_index = index - child_range.start;
+            if child_index < expanded.visible_chat_count {
+                return active_project_chats.get(child_index).cloned().map(|chat| {
+                    SidebarRow::Chat {
+                        project_index: expanded.project_index,
+                        chat_index: child_index,
+                        chat,
+                        selected: child_index == expanded.active_chat,
+                    }
                 });
             }
-        }
-        if projects.len() > visible_project_count {
-            rows.push(SidebarRow::ShowMore {
-                kind: PaginateKind::Projects,
+            return expanded.has_pager().then(|| SidebarRow::ShowMore {
+                kind: PaginateKind::ProjectChats {
+                    path: expanded.path.clone(),
+                },
             });
         }
-    }
 
-    if !projectless_chats.is_empty() {
-        rows.push(SidebarRow::SectionHeader { label: "Chats" });
-        rows.extend(
-            projectless_chats
-                .iter()
-                .take(visible_projectless_count)
-                .enumerate()
-                .map(|(chat_index, chat)| SidebarRow::ProjectlessChat {
-                    chat_index,
-                    chat: chat.clone(),
-                    selected: active_projectless_chat == Some(chat_index),
-                }),
-        );
-        if projectless_chats.len() > visible_projectless_count {
-            rows.push(SidebarRow::ShowMore {
-                kind: PaginateKind::ProjectlessChats,
-            });
+        let child_count = child_range.as_ref().map_or(0, |range| range.len());
+        let project_index = if let Some(range) = child_range
+            && index >= range.end
+        {
+            index.checked_sub(1 + child_count)?
+        } else {
+            index.checked_sub(1)?
+        };
+        if project_index < self.visible_project_count {
+            return projects
+                .get(project_index)
+                .cloned()
+                .map(|project| SidebarRow::Project {
+                    project_index,
+                    project,
+                    selected: project_index == self.active_project
+                        && self.active_projectless_chat.is_none(),
+                    expanded: self
+                        .expanded_project
+                        .as_ref()
+                        .is_some_and(|expanded| expanded.project_index == project_index),
+                });
         }
+
+        self.has_project_pager().then_some(SidebarRow::ShowMore {
+            kind: PaginateKind::Projects,
+        })
     }
 
-    rows
+    fn project_body_len(&self) -> usize {
+        self.visible_project_count
+            + self
+                .expanded_project
+                .as_ref()
+                .map_or(0, ExpandedProject::child_count)
+    }
+
+    fn has_project_pager(&self) -> bool {
+        self.project_count > self.visible_project_count
+    }
+
+    fn has_projectless_pager(&self) -> bool {
+        self.projectless_chat_count > self.visible_projectless_chat_count
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn collect_rows<Project: Clone, Chat: Clone>(
+        rows: &SidebarRowDisplayStatus,
+        projects: &[Project],
+        projectless: &[Chat],
+        active_chats: &[Chat],
+    ) -> Vec<SidebarRow<Project, Chat>> {
+        (0..rows.len())
+            .map(|index| {
+                rows.row_at(index, projects, projectless, active_chats)
+                    .expect("every projected index should resolve")
+            })
+            .collect()
+    }
+
     #[test]
-    fn flattens_only_the_active_projects_visible_threads() {
+    fn indexes_only_the_active_projects_visible_threads() {
         let projects = vec!["one", "two", "three"];
         let chats = (0..8).collect::<Vec<_>>();
-        let rows = build_sidebar_rows(
-            &projects,
+        let rows = SidebarRowDisplayStatus::new(
             projects.len(),
-            &[] as &[i32],
+            projects.len(),
+            0,
             0,
             1,
             2,
             None,
-            Some("two"),
-            &chats,
+            Some("two".into()),
+            chats.len(),
             5,
-            &HashSet::new(),
+            false,
         );
+        let rows = collect_rows(&rows, &projects, &[] as &[i32], &chats);
 
-        assert_eq!(rows.len(), 10); // header + 3 projects + 5 chats + show-more.
+        assert_eq!(rows.len(), 10);
         assert!(matches!(rows[0], SidebarRow::SectionHeader { .. }));
         assert!(matches!(
             rows[2],
@@ -160,27 +368,36 @@ mod tests {
             }
         ));
         assert!(matches!(rows[8], SidebarRow::ShowMore { .. }));
+        assert!(matches!(
+            rows[9],
+            SidebarRow::Project {
+                project_index: 2,
+                expanded: false,
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn projectless_chats_render_in_their_own_section() {
+    fn indexes_projectless_chats_in_their_own_section() {
         let projects = vec!["one"];
         let projectless = vec![10, 11, 12];
-        let rows = build_sidebar_rows(
-            &projects,
+        let rows = SidebarRowDisplayStatus::new(
             projects.len(),
-            &projectless,
+            projects.len(),
+            projectless.len(),
             projectless.len(),
             0,
             0,
             Some(1),
-            Some("one"),
-            &[] as &[i32],
+            Some("one".into()),
             0,
-            &HashSet::new(),
+            0,
+            false,
         );
+        let rows = collect_rows(&rows, &projects, &projectless, &[] as &[i32]);
 
-        assert_eq!(rows.len(), 5); // projects header + project + chats header + 3 chats.
+        assert_eq!(rows.len(), 5);
         assert!(matches!(rows[0], SidebarRow::SectionHeader { .. }));
         assert!(matches!(
             rows[1],
@@ -210,78 +427,47 @@ mod tests {
     }
 
     #[test]
-    fn pagination_adds_show_more_rows_for_both_sections() {
-        let projects = (0..15).collect::<Vec<_>>();
-        let projectless = (0..15).collect::<Vec<_>>();
-        let rows = build_sidebar_rows(
-            &projects,
+    fn reports_pager_positions_and_body_lengths() {
+        let rows = SidebarRowDisplayStatus::new(
+            15,
             10,
-            &projectless,
+            15,
             10,
             0,
             0,
-            None,
-            Some("0"),
-            &[] as &[i32],
+            Some(0),
+            Some("zero".into()),
             0,
-            &HashSet::new(),
+            0,
+            false,
         );
 
-        assert_eq!(rows.len(), 24); // header + 10 projects + show-more + header + 10 chats + show-more.
-        let kinds = rows
-            .iter()
-            .filter_map(|row| match row {
-                SidebarRow::ShowMore { kind } => Some(kind),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(kinds.len(), 2);
-        assert!(matches!(kinds[0], PaginateKind::Projects));
-        assert!(matches!(kinds[1], PaginateKind::ProjectlessChats));
+        assert_eq!(rows.len(), 24);
+        assert_eq!(
+            rows.pagination_pager_index(&PaginateKind::Projects),
+            Some(11)
+        );
+        assert_eq!(
+            rows.pagination_pager_index(&PaginateKind::ProjectlessChats),
+            Some(23)
+        );
+        assert_eq!(rows.pagination_body_len(&PaginateKind::Projects), Some(10));
+        assert_eq!(
+            rows.pagination_body_len(&PaginateKind::ProjectlessChats),
+            Some(10)
+        );
     }
 
     #[test]
-    fn expanded_show_all_and_collapse_change_only_the_flattened_rows() {
-        let projects = vec!["one", "two"];
-        let chats = (0..8).collect::<Vec<_>>();
-        let rows = build_sidebar_rows(
-            &projects,
-            projects.len(),
-            &[] as &[i32],
-            0,
-            0,
-            0,
-            None,
-            Some("one"),
-            &chats,
-            chats.len(),
-            &HashSet::new(),
-        );
-        assert_eq!(rows.len(), 11); // header + 2 projects + all 8 chats.
-        assert!(
-            !rows
-                .iter()
-                .any(|row| matches!(row, SidebarRow::ShowMore { .. }))
-        );
+    fn collapse_removes_only_the_expanded_children_range() {
+        let expanded =
+            SidebarRowDisplayStatus::new(2, 2, 0, 0, 0, 0, None, Some("one".into()), 8, 8, false);
+        let collapsed =
+            SidebarRowDisplayStatus::new(2, 2, 0, 0, 0, 0, None, Some("one".into()), 8, 8, true);
 
-        let collapsed = HashSet::from(["one".to_string()]);
-        let rows = build_sidebar_rows(
-            &projects,
-            projects.len(),
-            &[] as &[i32],
-            0,
-            0,
-            0,
-            None,
-            Some("one"),
-            &chats,
-            chats.len(),
-            &collapsed,
-        );
-        assert_eq!(rows.len(), 3); // header + 2 project rows.
-        assert!(rows.iter().all(|row| matches!(
-            row,
-            SidebarRow::Project { .. } | SidebarRow::SectionHeader { .. }
-        )));
+        assert_eq!(expanded.len(), 11);
+        assert_eq!(expanded.expanded_children_range(), Some(2..10));
+        assert_eq!(collapsed.len(), 3);
+        assert_eq!(collapsed.expanded_children_range(), None);
     }
 }
