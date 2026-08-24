@@ -188,8 +188,10 @@ impl Render for Sidebar {
         ));
         let item_count_changed = self.list_state.item_count() != rows.len();
         if item_count_changed {
+            let scroll_top = self.list_state.logical_scroll_top();
             self.list_state
                 .reset_with_uniform_height(rows.len(), SIDEBAR_ROW_HEIGHT);
+            self.list_state.scroll_to(scroll_top);
         }
         let active_project_row = rows.iter().position(|row| {
             matches!(
@@ -197,9 +199,7 @@ impl Render for Sidebar {
                 SidebarRow::Project { project_index, .. } if *project_index == active_project
             )
         });
-        if active_project_row.is_some()
-            && (item_count_changed || self.list_active_project != Some(active_project))
-        {
+        if active_project_row.is_some() && self.list_active_project != Some(active_project) {
             self.list_state
                 .scroll_to_reveal_item(active_project_row.expect("checked above"));
         }
