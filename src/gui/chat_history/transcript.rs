@@ -215,6 +215,23 @@ mod tests {
     }
 
     #[test]
+    fn notice_body_updates_without_changing_the_source_marker() {
+        let mut before = TranscriptSnapshot::new();
+        before.push_block(HistoryBlock::Notice {
+            key: "bridge-error".into(),
+            body: "connection failed".into(),
+        });
+
+        let mut after = TranscriptSnapshot::new();
+        after.push_block(HistoryBlock::Notice {
+            key: "bridge-error".into(),
+            body: "connection failed again".into(),
+        });
+
+        assert_eq!(after.markdown, before.markdown);
+    }
+
+    #[test]
     fn parses_only_the_transcript_tag_and_quoted_id() {
         assert_eq!(
             html_tag_name(r#" <CodexTranscriptBlock id="block-1" /> "#),

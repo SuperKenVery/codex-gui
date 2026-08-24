@@ -27,6 +27,7 @@ pub(super) fn row_button(id: impl Into<gpui::ElementId>) -> Button {
 
 pub(super) fn render_sidebar_row(
     row: SidebarRow<Entity<ProjectState>, Entity<ChatState>>,
+    reveal: Option<f32>,
     sidebar: &WeakEntity<Sidebar>,
     cx: &mut App,
 ) -> gpui::AnyElement {
@@ -52,11 +53,21 @@ pub(super) fn render_sidebar_row(
         SidebarRow::ShowMore { kind } => show_more::render(kind, sidebar, cx),
     };
 
-    div()
+    let row = div()
         .h(SIDEBAR_ROW_HEIGHT)
         .w_full()
         .pr_1()
         .py(SIDEBAR_ROW_GAP)
-        .child(content)
-        .into_any_element()
+        .child(content);
+
+    match reveal {
+        None => row.into_any_element(),
+        Some(progress) => div()
+            .h(SIDEBAR_ROW_HEIGHT * progress)
+            .w_full()
+            .overflow_hidden()
+            .opacity(progress)
+            .child(row)
+            .into_any_element(),
+    }
 }

@@ -1,4 +1,5 @@
 mod messages;
+mod notices;
 mod tools;
 mod worked_summary;
 
@@ -63,6 +64,10 @@ pub(super) enum HistoryBlock {
         key: String,
         label: &'static str,
     },
+    Notice {
+        key: String,
+        body: SharedString,
+    },
     ToolGroup {
         key: String,
         tools: Arc<[ToolCallView]>,
@@ -82,6 +87,7 @@ impl HistoryBlock {
         match self {
             Self::User { key, .. } => BlockId::new("user", key),
             Self::AssistantHeader { key, .. } => BlockId::new("assistant-header", key),
+            Self::Notice { key, .. } => BlockId::new("notice", key),
             Self::ToolGroup { key, .. } => BlockId::tool_group(key),
             Self::WorkedSummary { turn_id, .. } => BlockId::new("worked-summary", turn_id),
         }
@@ -138,6 +144,7 @@ pub(super) fn render(
         HistoryBlock::AssistantHeader { label, .. } => {
             messages::render_assistant_header(label, cx.theme()).into_any_element()
         }
+        HistoryBlock::Notice { body, .. } => notices::render(body, cx.theme()).into_any_element(),
         HistoryBlock::ToolGroup {
             key,
             tools,

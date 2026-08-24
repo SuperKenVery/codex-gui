@@ -50,7 +50,10 @@ pub(super) fn build_transcript(
     }
 
     for notice in &chat.notices {
-        transcript.push_markdown(&notice.body);
+        transcript.push_block(HistoryBlock::Notice {
+            key: notice.id.clone(),
+            body: notice.body.clone(),
+        });
     }
 
     transcript
