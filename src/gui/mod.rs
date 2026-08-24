@@ -1,5 +1,6 @@
 mod chat_history;
 mod chat_panel;
+mod math;
 mod side_chat;
 mod sidebar;
 mod state;

@@ -6,6 +6,7 @@ use std::{
 
 use crate::gui::{
     ChatState, GuiState, MessageState, StreamState,
+    math::MathPlugin,
     transcript::{
         TranscriptBlockStore, TranscriptBlockTarget, TranscriptDocument, TranscriptPlugin,
     },
@@ -52,7 +53,9 @@ impl ChatHistory {
         let transcript = cx.new(|cx| TextViewState::markdown("", cx));
         let transcript_blocks = Arc::new(RwLock::new(Default::default()));
         let transcript_extensions =
-            TranscriptPlugin::new(cx.entity().downgrade(), transcript_blocks.clone()).extensions();
+            TranscriptPlugin::new(cx.entity().downgrade(), transcript_blocks.clone())
+                .extensions()
+                .plugin(MathPlugin::new());
 
         let mut history = Self {
             state,
