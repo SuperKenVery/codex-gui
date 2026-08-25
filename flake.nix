@@ -54,7 +54,20 @@
             extensions = [ "rust-src" ];
           };
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          source = craneLib.cleanCargoSource ./.;
+          source = lib.cleanSourceWith {
+            src = lib.cleanSource ./.;
+            filter =
+              path: type:
+              (craneLib.filterCargoSources path type)
+              # Keep non-Rust files which are embedded at compile time or by
+              # RustEmbed.  Crane's default Cargo filter only retains Rust and
+              # Cargo metadata.
+              || lib.hasSuffix ".js" path
+              || lib.hasSuffix ".json" path
+              || lib.hasSuffix ".scm" path
+              || lib.hasSuffix ".svg" path
+              || lib.hasSuffix ".ps1" path;
+          };
           dependencyDummySrc = craneLib.mkDummySrc {
             src = source;
             extraDummyScript = ''
@@ -86,6 +99,10 @@
             inherit version;
             src = source;
             strictDeps = true;
+            # Distribution builds compile the release binaries; test builds
+            # belong in a separate CI check and needlessly enlarge the shared
+            # Crane dependency artifact.
+            doCheck = false;
             nativeBuildInputs =
               with pkgs;
               [
