@@ -4,8 +4,8 @@ use std::{
 };
 
 use gpui::{
-    Context, Entity, EventEmitter, FollowMode, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, prelude::*, px,
+    Bounds, Context, Entity, EventEmitter, FollowMode, IntoElement, ParentElement, Pixels, Render,
+    Styled, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _,
@@ -18,6 +18,7 @@ use crate::gui::{ChatState, GuiState, widgets::render_notice};
 use super::{
     blocks::BlockId,
     math::MathPlugin,
+    motion::{SEND_DESTINATION_TIMEOUT, SendAnimationLaunch},
     projection::build_transcript,
     transcript::{TranscriptBlockStore, TranscriptPlugin, TranscriptSnapshot, node_has_id},
 };
@@ -34,6 +35,7 @@ pub struct ChatHistory {
     transcript_blocks: TranscriptBlockStore,
     transcript_markdown: String,
     transcript_chat_id: Option<String>,
+    send_animation: Option<SendAnimationLaunch>,
 }
 
 #[derive(Clone)]
@@ -75,6 +77,7 @@ impl ChatHistory {
             transcript_blocks,
             transcript_markdown: String::new(),
             transcript_chat_id: None,
+            send_animation: None,
         };
         history.rebuild_transcript(cx);
         history
@@ -86,6 +89,17 @@ impl ChatHistory {
             return;
         }
 
+        let preserve_send_animation = self.send_animation.as_ref().is_some_and(|animation| {
+            active_chat.as_ref().is_some_and(|chat| {
+                chat.read(cx)
+                    .pending_user_message()
+                    .is_some_and(|message| message.client_id == animation.client_id)
+            })
+        });
+        if !preserve_send_animation {
+            self.send_animation = None;
+        }
+
         self.chat_subscription = subscribe_to_chat(active_chat.as_ref(), cx);
         self.active_chat = active_chat;
         self.expanded_turns.clear();
@@ -94,6 +108,59 @@ impl ChatHistory {
         self.transcript_markdown.clear();
         self.transcript_chat_id = None;
         self.rebuild_transcript(cx);
+    }
+
+    pub(crate) fn begin_send_animation(
+        &mut self,
+        client_id: String,
+        source_bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if cx.reduce_motion() {
+            return;
+        }
+
+        self.send_animation = Some(SendAnimationLaunch::new(client_id.clone(), source_bounds));
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SEND_DESTINATION_TIMEOUT)
+                .await;
+            let _ = this.update(cx, |history, cx| {
+                history.expire_waiting_send_animation(&client_id, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(super) fn send_animation_launch(&self, client_id: &str) -> Option<SendAnimationLaunch> {
+        self.send_animation
+            .as_ref()
+            .filter(|animation| animation.client_id == client_id)
+            .cloned()
+    }
+
+    fn expire_waiting_send_animation(&mut self, client_id: &str, cx: &mut Context<Self>) {
+        let should_expire = self
+            .send_animation
+            .as_ref()
+            .is_some_and(|animation| animation.client_id == client_id && animation.is_waiting());
+        if should_expire {
+            self.finish_send_animation(client_id, cx);
+        }
+    }
+
+    pub(super) fn finish_send_animation(&mut self, client_id: &str, cx: &mut Context<Self>) {
+        if !self
+            .send_animation
+            .as_ref()
+            .is_some_and(|animation| animation.client_id == client_id)
+        {
+            return;
+        }
+        self.send_animation = None;
+        cx.notify();
     }
 
     pub(super) fn toggle_turn(&mut self, turn_id: &str, cx: &mut Context<Self>) {

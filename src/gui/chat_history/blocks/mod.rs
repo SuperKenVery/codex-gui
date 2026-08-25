@@ -112,13 +112,23 @@ pub(super) fn render(
             let edit_turn_id = turn_id.clone();
             let edit_body = body.clone();
             let fork_history = history.clone();
-            let actions_available = turn_id.is_some();
+            let animation = history
+                .read_with(cx, |history, _| history.send_animation_launch(&key))
+                .unwrap_or(None);
+            let completion_history = history.clone();
+            let completion_key = key.clone();
             messages::render_user(
                 &key,
                 body,
                 delivery,
-                actions_available,
+                turn_id.is_some(),
+                animation,
                 cx.theme(),
+                move |cx| {
+                    let _ = completion_history.update(cx, |history, cx| {
+                        history.finish_send_animation(&completion_key, cx)
+                    });
+                },
                 move |_, _, cx| {
                     cx.stop_propagation();
                     let Some(turn_id) = edit_turn_id.clone() else {
@@ -139,7 +149,6 @@ pub(super) fn render(
                         .update(cx, |history, cx| history.fork_user_message(turn_id, cx));
                 },
             )
-            .into_any_element()
         }
         HistoryBlock::AssistantHeader { label, .. } => {
             messages::render_assistant_header(label, cx.theme()).into_any_element()

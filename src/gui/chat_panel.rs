@@ -1,5 +1,8 @@
 use crate::app::CodexGui;
-use crate::gui::{ApprovalReviewerMode, ChatHistory, ChatHistoryEvent, GuiState, UiState};
+use crate::gui::{
+    ApprovalReviewerMode, ChatHistory, ChatHistoryEvent, GuiState, UiState,
+    new_client_user_message_id,
+};
 use gpui::{
     Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
     WeakEntity, Window, WindowControlArea, div, prelude::*, px,
@@ -102,17 +105,24 @@ impl ChatPanel {
         if self.user_message_sending(cx) {
             return;
         }
-        let text = self.composer_input.update(cx, |input, cx| {
+        let (text, source_bounds) = self.composer_input.update(cx, |input, cx| {
             let text = input.value().trim().to_string();
+            let source_bounds = input.text_bounds().unwrap_or_else(|| input.input_bounds());
             if !text.is_empty() {
                 input.set_value("", window, cx);
             }
-            text
+            (text, source_bounds)
         });
         if text.is_empty() {
             return;
         }
         let editing_message = self.editing_message.take();
+        let client_user_message_id = new_client_user_message_id();
+        if editing_message.is_none() {
+            self.history.update(cx, |history, cx| {
+                history.begin_send_animation(client_user_message_id.clone(), source_bounds, cx)
+            });
+        }
         let parent = self.parent.clone();
         cx.defer(move |cx| {
             let _ = parent.update(cx, |parent, cx| {
@@ -121,11 +131,12 @@ impl ChatPanel {
                         editing_message.source_thread_id,
                         editing_message.turn_id,
                         editing_message.previous_turn_id,
+                        client_user_message_id,
                         text,
                         cx,
                     );
                 } else {
-                    parent.submit_turn_text(text, cx);
+                    parent.submit_turn_text(client_user_message_id, text, cx);
                 }
             });
         });
@@ -165,19 +176,26 @@ impl ChatPanel {
         if self.user_message_sending(cx) {
             return;
         }
-        let text = self.composer_input.update(cx, |input, cx| {
+        let (text, source_bounds) = self.composer_input.update(cx, |input, cx| {
             let text = input.value().trim().to_string();
+            let source_bounds = input.text_bounds().unwrap_or_else(|| input.input_bounds());
             if !text.is_empty() {
                 input.set_value("", window, cx);
             }
-            text
+            (text, source_bounds)
         });
         if text.is_empty() {
             return;
         }
+        let client_user_message_id = new_client_user_message_id();
+        self.history.update(cx, |history, cx| {
+            history.begin_send_animation(client_user_message_id.clone(), source_bounds, cx)
+        });
         let parent = self.parent.clone();
         cx.defer(move |cx| {
-            let _ = parent.update(cx, |parent, cx| parent.steer_turn_text(text, cx));
+            let _ = parent.update(cx, |parent, cx| {
+                parent.steer_turn_text(client_user_message_id, text, cx)
+            });
         });
     }
 

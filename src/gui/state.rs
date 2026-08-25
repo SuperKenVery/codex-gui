@@ -4,6 +4,11 @@ use codex_app_server_protocol::{
     FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn, TurnStatus, UserInput,
 };
 use gpui::{AppContext, Context, Entity, SharedString};
+use uuid::Uuid;
+
+pub(crate) fn new_client_user_message_id() -> String {
+    format!("codex-gui-{}", Uuid::new_v4())
+}
 
 pub(crate) fn single_line_title(title: &str) -> String {
     title

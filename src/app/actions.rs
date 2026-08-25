@@ -9,7 +9,6 @@ use crate::{
     workspace::workspace_path,
 };
 use gpui::{AppContext, Context};
-use uuid::Uuid;
 
 impl CodexGui {
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -133,6 +132,7 @@ impl CodexGui {
         source_thread_id: String,
         turn_id: String,
         previous_turn_id: Option<String>,
+        client_user_message_id: String,
         text: String,
         cx: &mut Context<Self>,
     ) {
@@ -152,7 +152,6 @@ impl CodexGui {
             "replacing thread for edited message"
         );
         let settings = self.state.read(cx).chat_settings.clone();
-        let client_user_message_id = new_client_user_message_id();
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
             let _notification_mute = bridge.mute_thread_notifications();
@@ -257,7 +256,12 @@ impl CodexGui {
     ///
     /// If the UI is on the new-chat page, this stashes the text, creates a
     /// thread, and lets `apply_thread_started` send the pending first turn.
-    pub(crate) fn submit_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn submit_turn_text(
+        &mut self,
+        client_user_message_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.ui_state.read(cx).active_turn.is_some() || self.pending_thread_chat.is_some() {
             return;
         }
@@ -275,7 +279,6 @@ impl CodexGui {
                 return;
             };
             let cwd = project.read(cx).path.to_string();
-            let client_user_message_id = new_client_user_message_id();
             let title = single_line_title(&text);
             let pending_chat_id = format!("pending-{client_user_message_id}");
             let pending_chat = cx.new(|_| {
@@ -316,7 +319,6 @@ impl CodexGui {
             return;
         }
         let thread_id = chat.read(cx).id.clone();
-        let client_user_message_id = new_client_user_message_id();
         let pending_started = chat.update(cx, |chat, cx| {
             let started = chat.begin_user_message(client_user_message_id.clone(), text.clone());
             if started {
@@ -347,7 +349,12 @@ impl CodexGui {
         .detach();
     }
 
-    pub(crate) fn steer_turn_text(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(crate) fn steer_turn_text(
+        &mut self,
+        client_user_message_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active_turn) = self.ui_state.read(cx).active_turn.clone() else {
             return;
         };
@@ -361,7 +368,6 @@ impl CodexGui {
             return;
         }
         let active_thread_id = chat.read(cx).id.clone();
-        let client_user_message_id = new_client_user_message_id();
         let pending_started = chat.update(cx, |chat, cx| {
             let started = chat.begin_user_message(client_user_message_id.clone(), text.clone());
             if started {
@@ -488,8 +494,4 @@ impl CodexGui {
         })
         .detach();
     }
-}
-
-fn new_client_user_message_id() -> String {
-    format!("codex-gui-{}", Uuid::new_v4())
 }

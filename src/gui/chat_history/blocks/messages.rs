@@ -1,15 +1,18 @@
 use gpui::{
-    App, ClickEvent, ClipboardItem, ParentElement, SharedString, Styled, Window, div, prelude::*,
-    px,
+    AnyElement, App, ClickEvent, ClipboardItem, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, prelude::*, px,
 };
 use gpui_component::{
-    Sizable as _,
+    ElementExt as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     spinner::Spinner,
     theme::Theme,
 };
 
-use super::UserMessageDelivery;
+use super::{
+    super::motion::{AnimatedUserMessage, SendAnimationLaunch, UserMessageTarget},
+    UserMessageDelivery,
+};
 
 pub(super) fn render_assistant_header(author: &'static str, theme: &Theme) -> gpui::Div {
     div()
@@ -26,13 +29,29 @@ pub(super) fn render_user(
     body: SharedString,
     delivery: UserMessageDelivery,
     actions_available: bool,
+    animation: Option<SendAnimationLaunch>,
     theme: &Theme,
+    on_animation_complete: impl FnOnce(&mut App) + 'static,
     on_edit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_fork: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Div {
+) -> AnyElement {
     let copy_body = body.clone();
+    let animation_target = animation.as_ref().map(|_| UserMessageTarget::default());
+    let animation_overlay = animation
+        .as_ref()
+        .map(|_| render_user_bubble(body.clone(), theme).into_any_element());
+    let animating = animation_target.is_some();
+    let delivery = if animating {
+        UserMessageDelivery::Sending
+    } else {
+        delivery
+    };
+    let bubble = render_user_bubble(body, theme)
+        .when_some(animation_target.clone(), |bubble, target| {
+            bubble.on_prepaint(move |bounds, _, _| target.report(bounds))
+        });
 
-    div()
+    let row = div()
         .w_full()
         .min_w_0()
         .overflow_x_hidden()
@@ -47,20 +66,8 @@ pub(super) fn render_user(
                 .flex()
                 .flex_col()
                 .items_end()
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_x_hidden()
-                        .rounded_3xl()
-                        .bg(theme.secondary)
-                        .px_3()
-                        .py_2()
-                        .text_base()
-                        .line_height(px(25.))
-                        .text_color(theme.secondary_foreground)
-                        .whitespace_normal()
-                        .child(body),
-                )
+                .when(animating, |content| content.opacity(0.))
+                .child(bubble)
                 .child(
                     div()
                         .flex()
@@ -114,5 +121,35 @@ pub(super) fn render_user(
                                 )
                         }),
                 ),
+        );
+
+    if let Some(animation) = animation {
+        AnimatedUserMessage::new(
+            format!("animated-user-message-{key}"),
+            animation,
+            animation_target.expect("animation target must exist"),
+            row.into_any_element(),
+            animation_overlay.expect("animation overlay must exist"),
+            on_animation_complete,
         )
+        .into_any_element()
+    } else {
+        row.into_any_element()
+    }
+}
+
+fn render_user_bubble(body: SharedString, theme: &Theme) -> gpui::Div {
+    div()
+        .min_w_0()
+        .max_w(px(620.))
+        .overflow_x_hidden()
+        .rounded_3xl()
+        .bg(theme.secondary)
+        .px_3()
+        .py_2()
+        .text_base()
+        .line_height(px(25.))
+        .text_color(theme.secondary_foreground)
+        .whitespace_normal()
+        .child(body)
 }
