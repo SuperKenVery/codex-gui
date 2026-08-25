@@ -141,6 +141,9 @@
             commonArgs
             // {
               dummySrc = dependencyDummySrc;
+              # This derivation only exports Cargo artifacts; the final
+              # executable assertions belong to buildPackage below.
+              postInstall = "";
             }
           );
           codex-gui = craneLib.buildPackage (
