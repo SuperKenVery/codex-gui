@@ -5,9 +5,13 @@ use codex_app_server_protocol::{
     PatchChangeKind, ThreadItem,
 };
 use gpui::{
-    App, ClickEvent, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*,
+    AnyElement, App, IntoElement, ParentElement, SharedString, StyleRefinement, Styled, div,
+    prelude::*, transparent_white,
 };
-use gpui_component::{Icon, IconName, Sizable as _, h_flex, theme::Theme};
+use gpui_component::{
+    Icon, IconName, Sizable as _, StyledExt as _, accordion::Accordion, h_flex, spinner::Spinner,
+    theme::Theme,
+};
 
 pub(super) fn render_group(
     tools: &[ToolCallView],
@@ -15,132 +19,217 @@ pub(super) fn render_group(
     active_tail: bool,
     expanded: bool,
     theme: &Theme,
-    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_toggle: impl Fn(&mut App) + Send + Sync + 'static,
 ) -> gpui::Div {
     if tools.is_empty() {
         return div();
     }
 
-    let should_collapse = collapsible && !active_tail;
-    let tools_view = if should_collapse {
-        let mut tool_group = div().flex().flex_col().gap_2().child(
-            render_summary(tools, theme, expanded)
-                .id(format!("tool-summary-{}", tools[0].id))
-                .on_click(on_toggle),
-        );
-        if expanded {
-            tool_group = tool_group.child(render_list(tools, theme));
-        }
-        tool_group.into_any_element()
-    } else {
-        render_list(tools, theme).into_any_element()
-    };
+    let can_toggle = collapsible && !active_tail;
+    let open = !can_toggle || expanded;
+    let group_id = format!("tool-group-{}", tools[0].id);
+    let title_style = StyleRefinement::default().px_0().py_1();
+    // .font_normal()
+    // .text_color(theme.muted_foreground);
+    let content_style = StyleRefinement::default().px_0().pb_0();
+
+    let accordion = Accordion::new(group_id)
+        .bordered(false)
+        .xsmall()
+        .w_full()
+        .min_w_0()
+        .bg(theme.muted)
+        .rounded_lg()
+        .item(|item| {
+            item.open(open)
+                .disabled(!can_toggle)
+                .title(render_summary(tools, theme))
+                .title_style(title_style)
+                .content_style(content_style)
+                .hover(|style| style.bg(theme.muted.opacity(0.35)).rounded(theme.radius))
+                .bg(theme.transparent)
+                .child(render_list(tools, theme).p_5())
+        })
+        .when(can_toggle, |accordion| {
+            accordion.on_toggle_click(move |_, _, cx| on_toggle(cx))
+        });
 
     div()
         .w_full()
         .min_w_0()
         .overflow_x_hidden()
         .py_2()
-        .child(tools_view)
+        .child(accordion)
 }
 
-fn render_summary(tools: &[ToolCallView], theme: &Theme, expanded: bool) -> gpui::Div {
-    let running = tools.iter().filter(|tool| !tool.done).count();
-    let label = if running > 0 {
-        format!(
-            "Running {} {}",
-            tools.len(),
-            pluralize(tools.len(), "tool call")
-        )
-    } else {
-        format!(
-            "Ran {} {}",
-            tools.len(),
-            pluralize(tools.len(), "tool call")
-        )
-    };
+fn render_summary(tools: &[ToolCallView], theme: &Theme) -> gpui::Div {
+    let running = tools
+        .iter()
+        .filter(|tool| matches!(tool.status, ToolStatus::Running))
+        .count();
+    let failed = tools
+        .iter()
+        .filter(|tool| matches!(tool.status, ToolStatus::Failed))
+        .count();
 
-    div()
-        .w_full()
+    h_flex()
         .min_w_0()
-        .cursor_pointer()
+        .items_center()
+        .gap_1p5()
         .text_sm()
-        .text_color(theme.muted_foreground)
-        .child(
-            h_flex()
-                .items_center()
-                .gap_1()
-                .child(disclosure_icon(expanded, theme))
-                .child(label),
-        )
-}
-
-fn disclosure_icon(expanded: bool, theme: &Theme) -> impl IntoElement {
-    Icon::new(if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    })
-    .xsmall()
-    .text_color(theme.muted_foreground)
+        .child(if running > 0 {
+            format!(
+                "Running {} {}",
+                tools.len(),
+                pluralize(tools.len(), "tool call")
+            )
+        } else {
+            format!(
+                "Ran {} {}",
+                tools.len(),
+                pluralize(tools.len(), "tool call")
+            )
+        })
+        .when(failed > 0, |summary| {
+            summary.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.warning_foreground)
+                    .child(format!("{failed} failed")),
+            )
+        })
 }
 
 fn render_list(tools: &[ToolCallView], theme: &Theme) -> gpui::Div {
-    tools.iter().fold(
-        div().w_full().min_w_0().flex().flex_col().gap_2(),
-        |list, tool| list.child(render_tool(tool, theme)),
-    )
-}
-
-fn render_tool(tool: &ToolCallView, theme: &Theme) -> gpui::Div {
-    let (label, color) = if tool.done {
-        ("done", theme.success_foreground)
-    } else {
-        ("running", theme.warning_foreground)
-    };
     div()
         .w_full()
         .min_w_0()
-        .overflow_x_hidden()
-        .py_1()
         .flex()
-        .items_start()
-        .gap_3()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1p5()
+        .children(tools.iter().map(|tool| render_tool(tool, theme)))
+}
+
+fn render_tool(tool: &ToolCallView, theme: &Theme) -> gpui::Div {
+    h_flex()
+        .max_w_full()
+        .min_w_0()
+        .flex_shrink(1.)
+        .items_center()
+        .gap_1p5()
+        .rounded(theme.radius)
+        .border_3()
+        .border_color(theme.border)
+        .bg(transparent_white())
+        .px_2()
+        .py_1()
+        .text_sm()
+        .child(
+            Icon::new(tool.kind.icon())
+                .xsmall()
+                .flex_none()
+                .text_color(theme.muted_foreground),
+        )
         .child(
             div()
-                .flex_1()
                 .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_1()
+                .flex_1()
+                .truncate()
+                .whitespace_nowrap()
+                .text_color(theme.foreground)
+                .child(tool.content.clone()),
+        )
+        .child(render_trailing(tool, theme))
+}
+
+fn render_trailing(tool: &ToolCallView, theme: &Theme) -> AnyElement {
+    h_flex()
+        .flex_none()
+        .items_center()
+        .gap_1()
+        .when_some(tool.diff, |trailing, diff| {
+            trailing
                 .child(
                     div()
-                        .min_w_0()
-                        .overflow_x_hidden()
-                        .text_sm()
-                        .text_color(theme.foreground)
-                        .whitespace_normal()
-                        .child(tool.title.clone()),
+                        .text_xs()
+                        .text_color(theme.success_foreground)
+                        .child(format!("+{}", diff.additions)),
                 )
                 .child(
                     div()
-                        .min_w_0()
-                        .overflow_x_hidden()
                         .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .whitespace_normal()
-                        .child(tool.detail.clone()),
-                ),
-        )
-        .child(div().flex_none().text_color(color).text_xs().child(label))
+                        .text_color(theme.danger_foreground)
+                        .child(format!("-{}", diff.deletions)),
+                )
+        })
+        .child(render_status(tool.status, theme))
+        .into_any_element()
+}
+
+fn render_status(status: ToolStatus, theme: &Theme) -> AnyElement {
+    match status {
+        ToolStatus::Running => Spinner::new()
+            .xsmall()
+            .color(theme.warning_foreground)
+            .into_any_element(),
+        ToolStatus::Succeeded => Icon::new(IconName::Check)
+            .xsmall()
+            .text_color(theme.success_foreground)
+            .into_any_element(),
+        ToolStatus::Failed => Icon::new(IconName::CircleX)
+            .xsmall()
+            .text_color(theme.danger_foreground)
+            .into_any_element(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToolKind {
+    Command,
+    File,
+    Mcp,
+    Dynamic,
+}
+
+impl ToolKind {
+    fn icon(self) -> IconName {
+        match self {
+            Self::Command => IconName::SquareTerminal,
+            Self::File => IconName::File,
+            Self::Mcp => IconName::Globe,
+            Self::Dynamic => IconName::Asterisk,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToolStatus {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl ToolStatus {
+    fn done(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DiffStats {
+    additions: usize,
+    deletions: usize,
 }
 
 #[derive(Clone)]
 pub(in crate::gui::chat_history) struct ToolCallView {
     id: SharedString,
-    title: SharedString,
-    detail: SharedString,
-    done: bool,
+    kind: ToolKind,
+    content: SharedString,
+    diff: Option<DiffStats>,
+    status: ToolStatus,
 }
 
 pub(in crate::gui::chat_history) fn tool_call_views(tools: &[&ThreadItem]) -> Arc<[ToolCallView]> {
@@ -149,61 +238,105 @@ pub(in crate::gui::chat_history) fn tool_call_views(tools: &[&ThreadItem]) -> Ar
 
 impl ToolCallView {
     fn new(tool: &ThreadItem) -> Self {
-        let (title, detail) = tool_call_text(tool);
+        let status = tool_status(tool);
+        let (kind, content, diff) = tool_call_content(tool, status);
         Self {
             id: tool.id().to_string().into(),
-            title: title.into(),
-            detail: detail.into(),
-            done: tool_item_done(tool),
+            kind,
+            content: content.into(),
+            diff,
+            status,
         }
     }
 }
 
-fn tool_call_text(tool: &ThreadItem) -> (String, String) {
+fn tool_call_content(
+    tool: &ThreadItem,
+    status: ToolStatus,
+) -> (ToolKind, String, Option<DiffStats>) {
     match tool {
-        ThreadItem::CommandExecution { command, cwd, .. } => (
-            "Terminal".into(),
-            format!("{command} ({})", cwd.render_for_ui()),
-        ),
-        ThreadItem::FileChange { changes, .. } => {
-            let detail = if changes.is_empty() {
-                "Preparing file edits".into()
+        ThreadItem::CommandExecution { command, .. } => {
+            let action = if matches!(status, ToolStatus::Running) {
+                "Running"
             } else {
-                changes
-                    .iter()
-                    .map(|change| {
-                        let action = file_change_action(&change.kind);
-                        let path = match &change.kind {
-                            PatchChangeKind::Update {
-                                move_path: Some(move_path),
-                            } => format!("{} -> {}", change.path, move_path.display()),
-                            _ => change.path.clone(),
-                        };
-                        let stats = diff_stats(&change.diff);
-                        format!(
-                            "{action} {path} (+{} -{})",
-                            stats.additions, stats.deletions
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                "Ran"
             };
-            ("File edit".into(), detail)
+            (
+                ToolKind::Command,
+                format!("{action} {}", single_line(command)),
+                None,
+            )
+        }
+        ThreadItem::FileChange { changes, .. } => {
+            if changes.is_empty() {
+                return (ToolKind::File, "Preparing file edits".into(), None);
+            }
+
+            let diff = changes.iter().fold(
+                DiffStats {
+                    additions: 0,
+                    deletions: 0,
+                },
+                |mut total, change| {
+                    let stats = diff_stats(&change.diff);
+                    total.additions += stats.additions;
+                    total.deletions += stats.deletions;
+                    total
+                },
+            );
+            let action = file_change_action(&changes[0].kind, status);
+            let all_same_action = changes
+                .iter()
+                .all(|change| file_change_action(&change.kind, status) == action);
+            let content = if let [change] = changes.as_slice() {
+                let path = match &change.kind {
+                    PatchChangeKind::Update {
+                        move_path: Some(move_path),
+                    } => format!("{} → {}", change.path, move_path.display()),
+                    _ => change.path.clone(),
+                };
+                format!("{action} {path}")
+            } else if all_same_action {
+                format!("{action} {} files", changes.len())
+            } else {
+                let action = if matches!(status, ToolStatus::Running) {
+                    "Changing"
+                } else {
+                    "Changed"
+                };
+                format!("{action} {} files", changes.len())
+            };
+            let diff = (diff.additions > 0 || diff.deletions > 0).then_some(diff);
+            (ToolKind::File, content, diff)
         }
         ThreadItem::McpToolCall { server, tool, .. } => {
-            ("MCP tool".into(), format!("{server}.{tool}"))
+            let action = if matches!(status, ToolStatus::Running) {
+                "Calling"
+            } else {
+                "Called"
+            };
+            (ToolKind::Mcp, format!("{action} {server}.{tool}"), None)
         }
         ThreadItem::DynamicToolCall {
             namespace, tool, ..
         } => {
-            let detail = namespace
+            let name = namespace
                 .as_ref()
                 .map(|namespace| format!("{namespace}.{tool}"))
                 .unwrap_or_else(|| tool.clone());
-            ("Tool call".into(), detail)
+            let action = if matches!(status, ToolStatus::Running) {
+                "Calling"
+            } else {
+                "Called"
+            };
+            (ToolKind::Dynamic, format!("{action} {name}"), None)
         }
-        _ => ("Tool call".into(), String::new()),
+        _ => (ToolKind::Dynamic, "Tool call".into(), None),
     }
+}
+
+fn single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(in crate::gui::chat_history) fn is_tool_item(item: &ThreadItem) -> bool {
@@ -217,35 +350,57 @@ pub(in crate::gui::chat_history) fn is_tool_item(item: &ThreadItem) -> bool {
 }
 
 pub(in crate::gui::chat_history) fn tools_done(tools: &[&ThreadItem]) -> bool {
-    !tools.is_empty() && tools.iter().all(|tool| tool_item_done(tool))
+    !tools.is_empty() && tools.iter().all(|tool| tool_status(tool).done())
 }
 
-fn tool_item_done(item: &ThreadItem) -> bool {
+fn tool_status(item: &ThreadItem) -> ToolStatus {
     match item {
-        ThreadItem::CommandExecution { status, .. } => {
-            !matches!(status, CommandExecutionStatus::InProgress)
-        }
-        ThreadItem::FileChange { status, .. } => !matches!(status, PatchApplyStatus::InProgress),
-        ThreadItem::McpToolCall { status, .. } => !matches!(status, McpToolCallStatus::InProgress),
-        ThreadItem::DynamicToolCall { status, .. } => {
-            !matches!(status, DynamicToolCallStatus::InProgress)
-        }
-        _ => false,
+        ThreadItem::CommandExecution { status, .. } => match status {
+            CommandExecutionStatus::InProgress => ToolStatus::Running,
+            CommandExecutionStatus::Completed => ToolStatus::Succeeded,
+            CommandExecutionStatus::Failed | CommandExecutionStatus::Declined => ToolStatus::Failed,
+        },
+        ThreadItem::FileChange { status, .. } => match status {
+            PatchApplyStatus::InProgress => ToolStatus::Running,
+            PatchApplyStatus::Completed => ToolStatus::Succeeded,
+            PatchApplyStatus::Failed | PatchApplyStatus::Declined => ToolStatus::Failed,
+        },
+        ThreadItem::McpToolCall { status, .. } => match status {
+            McpToolCallStatus::InProgress => ToolStatus::Running,
+            McpToolCallStatus::Completed => ToolStatus::Succeeded,
+            McpToolCallStatus::Failed => ToolStatus::Failed,
+        },
+        ThreadItem::DynamicToolCall {
+            status, success, ..
+        } => match status {
+            DynamicToolCallStatus::InProgress => ToolStatus::Running,
+            DynamicToolCallStatus::Completed if success != &Some(false) => ToolStatus::Succeeded,
+            DynamicToolCallStatus::Completed | DynamicToolCallStatus::Failed => ToolStatus::Failed,
+        },
+        _ => ToolStatus::Failed,
     }
 }
 
-fn file_change_action(kind: &PatchChangeKind) -> &'static str {
+fn file_change_action(kind: &PatchChangeKind, status: ToolStatus) -> &'static str {
+    let running = matches!(status, ToolStatus::Running);
     match kind {
-        PatchChangeKind::Add => "added",
-        PatchChangeKind::Delete => "deleted",
-        PatchChangeKind::Update { move_path: None } => "edited",
-        PatchChangeKind::Update { move_path: Some(_) } => "moved",
+        PatchChangeKind::Add if running => "Adding",
+        PatchChangeKind::Add => "Added",
+        PatchChangeKind::Delete if running => "Deleting",
+        PatchChangeKind::Delete => "Deleted",
+        PatchChangeKind::Update {
+            move_path: None, ..
+        } if running => "Editing",
+        PatchChangeKind::Update {
+            move_path: None, ..
+        } => "Edited",
+        PatchChangeKind::Update {
+            move_path: Some(_), ..
+        } if running => "Moving",
+        PatchChangeKind::Update {
+            move_path: Some(_), ..
+        } => "Moved",
     }
-}
-
-struct DiffStats {
-    additions: usize,
-    deletions: usize,
 }
 
 fn diff_stats(diff: &str) -> DiffStats {

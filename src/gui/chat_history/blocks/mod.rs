@@ -168,7 +168,7 @@ pub(super) fn render(
                 active_tail,
                 expanded,
                 cx.theme(),
-                move |_, _, cx| {
+                move |cx| {
                     let key = key.clone();
                     let _ = history.update(cx, |history, cx| history.toggle_tools(&key, cx));
                 },
