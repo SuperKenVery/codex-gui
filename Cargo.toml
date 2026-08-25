@@ -2,6 +2,11 @@
 name = "codex-gui"
 version = "0.1.0"
 edition = "2024"
+default-run = "codex-gui"
+
+[[bin]]
+name = "codex-code-mode-host"
+path = "src/bin/codex_code_mode_host.rs"
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed" }
@@ -20,11 +25,14 @@ ratex-types = "0.1.14"
 codex-app-server-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 codex-app-server-client = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 codex-arg0 = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+codex-code-mode-host = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 codex-core = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
@@ -37,6 +45,9 @@ gpui = { git = "https://github.com/zed-industries/zed", features = [
 [patch.crates-io]
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+
+[patch."https://github.com/openai/codex.git"]
+codex-code-mode-runtime = { path = "crates/codex-code-mode-runtime-quickjs" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

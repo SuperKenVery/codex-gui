@@ -1,0 +1,18 @@
+[package]
+name = "codex-code-mode-runtime"
+version = "0.147.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "codex_code_mode_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+codex-code-mode-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
+rquickjs = { version = "0.12.2", features = ["futures"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"

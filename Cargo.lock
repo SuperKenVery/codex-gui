@@ -2661,6 +2661,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-code-mode-host"
+version = "0.147.0"
+source = "git+https://github.com/openai/codex.git?tag=rust-v0.147.0#be6e8eac029b183056b7e4402879f15d2c85f61b"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "codex-code-mode-protocol",
+ "codex-code-mode-runtime",
+ "futures",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "codex-code-mode-protocol"
 version = "0.147.0"
 source = "git+https://github.com/openai/codex.git?tag=rust-v0.147.0#be6e8eac029b183056b7e4402879f15d2c85f61b"
@@ -2670,6 +2688,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "codex-code-mode-runtime"
+version = "0.147.0"
+dependencies = [
+ "codex-code-mode-protocol",
+ "rquickjs",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3224,9 +3254,12 @@ dependencies = [
 name = "codex-gui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
  "codex-app-server-client",
  "codex-app-server-protocol",
  "codex-arg0",
+ "codex-code-mode-host",
  "codex-core",
  "codex-protocol",
  "gpui",
@@ -6271,8 +6304,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -7301,7 +7334,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.18",
- "windows 0.62.2",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -7876,6 +7909,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -8305,7 +8343,7 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.6.1",
+ "windows-registry 0.4.0",
 ]
 
 [[package]]
@@ -8386,7 +8424,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -11640,7 +11678,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -12597,6 +12635,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relative-path"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca40a312222d8ba74837cb474edef44b37f561da5f773981007a10bbaa992b0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12830,6 +12877,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rquickjs"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e04e4eedfb060b503b5f0a2644abb890b0b3620d3fb674f9455f230014964e4"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16e4f499ac5b943d97ee6dbc44f23c2c10426f420f7d2f1793d6318911b6608c"
+dependencies = [
+ "async-lock",
+ "hashbrown 0.17.1",
+ "relative-path",
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13ac243b86a74120814ef7e9e30ad5a2c1199b7b9963b1cf7c84e4cdc1cad99"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
