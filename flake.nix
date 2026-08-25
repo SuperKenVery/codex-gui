@@ -207,23 +207,29 @@
                 nativeBuildInputs = [ pkgs.macdylibbundler ];
               }
               ''
-                app="$out/Codex GUI.app"
+                # dylibbundler 1.0.4 passes paths to otool through a shell
+                # without preserving spaces, so bundle under a temporary
+                # space-free name and rename only after signing.
+                app="$out/CodexGUI.app"
                 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
                 cp ${codex-gui}/bin/codex-gui "$app/Contents/MacOS/codex-gui"
                 cp ${codex-gui}/bin/codex-code-mode-host "$app/Contents/MacOS/codex-code-mode-host"
                 cp ${macosInfoPlist} "$app/Contents/Info.plist"
                 chmod 755 "$app/Contents/MacOS/codex-gui" "$app/Contents/MacOS/codex-code-mode-host"
 
-                dylibbundler -od -b \
+                # Sign the completed app ourselves. dylibbundler's ad-hoc
+                # signer is not on PATH in a sandboxed Nix build.
+                dylibbundler -ns -od -b \
                   -x "$app/Contents/MacOS/codex-gui" \
                   -d "$app/Contents/Frameworks" \
                   -p @executable_path/../Frameworks/
-                dylibbundler -od -b \
+                dylibbundler -ns -of -cd -b \
                   -x "$app/Contents/MacOS/codex-code-mode-host" \
                   -d "$app/Contents/Frameworks" \
                   -p @executable_path/../Frameworks/
 
                 /usr/bin/codesign --force --deep --sign - "$app"
+                mv "$app" "$out/Codex GUI.app"
               '';
 
           macosArchive =
