@@ -316,7 +316,7 @@ impl ChatPanel {
             .child(
                 Textarea::new(&self.composer_input)
                     .appearance(false)
-                    .h(px(60.))
+                    .min_h(px(60.))
                     .w_full(),
             )
             .child(
