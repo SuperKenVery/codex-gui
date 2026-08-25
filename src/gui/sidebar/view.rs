@@ -7,7 +7,6 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
-    animation::ease_out_cubic,
     button::{Button, ButtonVariants as _},
     scroll::ScrollableElement as _,
     spinner::Spinner,
@@ -28,9 +27,13 @@ impl Render for Sidebar {
         let state = self.state.clone();
         let sidebar = cx.entity().downgrade();
         let fold_animation = self.project_fold_animation.clone();
+        let departing_fold_animation = self.departing_project_fold_animation.clone();
         let animated_children = fold_animation
             .as_ref()
             .and_then(|_| rows.expanded_children_range());
+        let departing_animated_children = departing_fold_animation
+            .as_ref()
+            .and_then(|_| rows.departing_children_range());
 
         div()
             .w(px(286.))
@@ -112,6 +115,7 @@ impl Render for Sidebar {
                                 .into_any_element()
                         } else {
                             let row_animation = fold_animation.clone();
+                            let departing_row_animation = departing_fold_animation.clone();
                             let sidebar_list =
                                 list(self.list_state.clone(), move |index, _, cx| {
                                     let state = state.read(cx);
@@ -122,25 +126,41 @@ impl Render for Sidebar {
                                     let active_project_chats = active_project
                                         .as_ref()
                                         .map_or(&[][..], |project| project.chats.as_slice());
+                                    let departing_project = rows
+                                        .departing_project_index()
+                                        .and_then(|project_index| state.projects.get(project_index))
+                                        .map(|project| project.read(cx));
+                                    let departing_project_chats = departing_project
+                                        .as_ref()
+                                        .map_or(&[][..], |project| project.chats.as_slice());
                                     let mut row = rows.row_at(
                                         index,
                                         &state.projects,
                                         &state.projectless_chats,
                                         active_project_chats,
+                                        departing_project_chats,
                                     );
-                                    if let (
-                                        Some(animation),
-                                        Some(SidebarRow::Project {
-                                            project, expanded, ..
-                                        }),
-                                    ) = (row_animation.as_ref(), row.as_mut())
-                                        && project.read(cx).path.as_ref()
-                                            == animation.project_path.as_str()
+                                    if let Some(SidebarRow::Project {
+                                        project, expanded, ..
+                                    }) = row.as_mut()
                                     {
-                                        *expanded = animation.is_expanding();
+                                        let path = project.read(cx).path.to_string();
+                                        if let Some(animation) = row_animation
+                                            .as_ref()
+                                            .filter(|animation| animation.project_path == path)
+                                            .or_else(|| {
+                                                departing_row_animation.as_ref().filter(
+                                                    |animation| animation.project_path == path,
+                                                )
+                                            })
+                                        {
+                                            *expanded = animation.is_expanding();
+                                        }
                                     }
-                                    let reveal = animated_children.as_ref().and_then(|range| {
-                                        range.contains(&index).then(|| {
+                                    let reveal = animated_children
+                                        .as_ref()
+                                        .filter(|range| range.contains(&index))
+                                        .map(|range| {
                                             let progress = row_animation
                                                 .as_ref()
                                                 .expect("animated range requires fold animation")
@@ -151,14 +171,55 @@ impl Render for Sidebar {
                                                 range.len(),
                                             )
                                         })
-                                    });
+                                        .or_else(|| {
+                                            departing_animated_children
+                                                .as_ref()
+                                                .filter(|range| range.contains(&index))
+                                                .map(|range| {
+                                                    let progress = departing_row_animation
+                                                        .as_ref()
+                                                        .expect("animated range requires fold animation")
+                                                        .current();
+                                                    project_child_reveal_progress(
+                                                        progress,
+                                                        index - range.start,
+                                                        range.len(),
+                                                    )
+                                                })
+                                        });
                                     row.map(|row| render_sidebar_row(row, reveal, &sidebar, cx))
                                         .unwrap_or_else(|| div().into_any_element())
                                 })
                                 .size_full();
 
-                            match fold_animation {
-                                Some(animation) => {
+                            match (fold_animation, departing_fold_animation) {
+                                (Some(animation), Some(departing_animation)) => {
+                                    let generation = animation.generation;
+                                    let duration = animation.duration;
+                                    let departing_generation = departing_animation.generation;
+                                    let departing_duration = departing_animation.duration;
+                                    sidebar_list
+                                        .with_animation(
+                                            format!("project-fold-{generation}"),
+                                            Animation::new(duration)
+                                                .with_easing(|x| 1.0 - (x - 1.0).powi(5).abs()),
+                                            move |list, delta| {
+                                                animation.update(delta);
+                                                list
+                                            },
+                                        )
+                                        .with_animation(
+                                            format!("project-fold-{departing_generation}"),
+                                            Animation::new(departing_duration)
+                                                .with_easing(|x| 1.0 - (x - 1.0).powi(5).abs()),
+                                            move |list, delta| {
+                                                departing_animation.update(delta);
+                                                list
+                                            },
+                                        )
+                                        .into_any_element()
+                                }
+                                (Some(animation), None) | (None, Some(animation)) => {
                                     let generation = animation.generation;
                                     let duration = animation.duration;
                                     sidebar_list
@@ -166,7 +227,6 @@ impl Render for Sidebar {
                                             format!("project-fold-{generation}"),
                                             Animation::new(duration)
                                                 .with_easing(|x| 1.0 - (x - 1.0).powi(5).abs()),
-                                            // .with_easing(|x| x),
                                             move |list, delta| {
                                                 animation.update(delta);
                                                 list
@@ -174,7 +234,7 @@ impl Render for Sidebar {
                                         )
                                         .into_any_element()
                                 }
-                                None => sidebar_list.into_any_element(),
+                                (None, None) => sidebar_list.into_any_element(),
                             }
                         }
                     } else {

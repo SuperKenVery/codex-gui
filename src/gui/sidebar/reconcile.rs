@@ -87,7 +87,14 @@ impl Sidebar {
             }
         }
 
-        let next = self.rows_from_state(cx);
+        let mut next = self.rows_from_state(cx);
+        let retaining_departing_project = self
+            .departing_project_fold_animation
+            .as_ref()
+            .filter(|animation| Some(&animation.project_path) != active_project_path.as_ref())
+            .is_some_and(|animation| {
+                next.retain_departing_project_from(&self.display_status, &animation.project_path)
+            });
         if self.display_status == next {
             return;
         }
@@ -103,16 +110,32 @@ impl Sidebar {
         let new_project_base_len = next.project_base_len();
         let children_changed = !self.display_status.has_same_expanded_structure(&next);
         let project_base_changed = old_project_base_len != new_project_base_len;
+        let transitioning_between_projects =
+            retaining_departing_project || self.display_status.departing_project_path().is_some();
 
         if children_changed || project_base_changed {
-            if let Some(range) = self.display_status.expanded_children_range() {
-                self.remove_rows(range);
-            }
-            if project_base_changed {
-                self.replace_rows(0..old_project_base_len, new_project_base_len);
-            }
-            if let Some(range) = next.expanded_children_range() {
-                self.insert_rows(range.start, range.len());
+            if retaining_departing_project
+                && self.display_status.departing_project_path().is_none()
+                && !project_base_changed
+            {
+                if let Some(range) = next.expanded_children_range() {
+                    self.insert_rows(range.start, range.len());
+                }
+            } else if transitioning_between_projects {
+                self.replace_rows(
+                    0..self.display_status.project_section_len(),
+                    next.project_section_len(),
+                );
+            } else {
+                if let Some(range) = self.display_status.expanded_children_range() {
+                    self.remove_rows(range);
+                }
+                if project_base_changed {
+                    self.replace_rows(0..old_project_base_len, new_project_base_len);
+                }
+                if let Some(range) = next.expanded_children_range() {
+                    self.insert_rows(range.start, range.len());
+                }
             }
         }
 
@@ -188,6 +211,34 @@ impl Sidebar {
             self.display_status = after;
             debug_assert_eq!(self.list_state.item_count(), self.display_status.len());
         }
+        cx.notify();
+    }
+
+    pub(super) fn finish_departing_project_fold_animation(
+        &mut self,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(animation) = self
+            .departing_project_fold_animation
+            .as_ref()
+            .filter(|animation| animation.generation == generation)
+            .cloned()
+        else {
+            return;
+        };
+
+        self.departing_project_fold_animation = None;
+        self.collapsed_projects.insert(animation.project_path);
+        let before = self.display_status.clone();
+        let after = self.rows_from_state(cx);
+        if let Some(range) = before.departing_children_range() {
+            self.remove_rows(range);
+        } else {
+            self.apply_expansion_change(&before, &after);
+        }
+        self.display_status = after;
+        debug_assert_eq!(self.list_state.item_count(), self.display_status.len());
         cx.notify();
     }
 }

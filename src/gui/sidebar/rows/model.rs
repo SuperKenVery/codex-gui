@@ -68,6 +68,9 @@ pub struct SidebarRowDisplayStatus {
     active_project: usize,
     active_projectless_chat: Option<usize>,
     expanded_project: Option<ExpandedProject>,
+    /// The previously active project, retained only while its children animate
+    /// out during a project switch.
+    departing_project: Option<ExpandedProject>,
 }
 
 impl SidebarRowDisplayStatus {
@@ -111,6 +114,7 @@ impl SidebarRowDisplayStatus {
             active_project,
             active_projectless_chat,
             expanded_project,
+            departing_project: None,
         }
     }
 
@@ -128,7 +132,53 @@ impl SidebarRowDisplayStatus {
 
     pub fn active_project_row(&self) -> Option<usize> {
         (self.project_count > 0 && self.active_project < self.visible_project_count)
-            .then_some(1 + self.active_project)
+            .then(|| {
+                let preceding_child_count = [&self.expanded_project, &self.departing_project]
+                    .into_iter()
+                    .filter_map(Option::as_ref)
+                    .filter(|expanded| expanded.project_index < self.active_project)
+                    .map(ExpandedProject::child_count)
+                    .sum::<usize>();
+                1 + self.active_project + preceding_child_count
+            })
+    }
+
+    pub fn expanded_project_path(&self) -> Option<&str> {
+        self.expanded_project
+            .as_ref()
+            .map(|expanded| expanded.path.as_str())
+    }
+
+    pub fn departing_project_path(&self) -> Option<&str> {
+        self.departing_project
+            .as_ref()
+            .map(|expanded| expanded.path.as_str())
+    }
+
+    pub fn departing_project_index(&self) -> Option<usize> {
+        self.departing_project
+            .as_ref()
+            .map(|expanded| expanded.project_index)
+    }
+
+    pub fn retain_departing_project_from(&mut self, previous: &Self, path: &str) -> bool {
+        let Some(departing) = previous
+            .departing_project
+            .as_ref()
+            .or(previous.expanded_project.as_ref())
+            .filter(|expanded| expanded.path == path)
+        else {
+            return false;
+        };
+        if self
+            .expanded_project
+            .as_ref()
+            .is_none_or(|arriving| arriving.path == departing.path)
+        {
+            return false;
+        }
+        self.departing_project = Some(departing.clone());
+        true
     }
 
     pub fn project_section_len(&self) -> usize {
@@ -139,10 +189,7 @@ impl SidebarRowDisplayStatus {
     }
 
     pub fn project_base_len(&self) -> usize {
-        self.project_section_len()
-            - self
-                .expanded_children_range()
-                .map_or(0, |range| range.len())
+        self.project_section_len() - self.expanded_child_count()
     }
 
     pub fn projectless_section_len(&self) -> usize {
@@ -154,21 +201,30 @@ impl SidebarRowDisplayStatus {
 
     pub fn expanded_children_range(&self) -> Option<Range<usize>> {
         let expanded = self.expanded_project.as_ref()?;
-        let start = 1 + expanded.project_index + 1;
-        Some(start..start + expanded.child_count())
+        Some(self.children_range_for(expanded))
+    }
+
+    pub fn departing_children_range(&self) -> Option<Range<usize>> {
+        let departing = self.departing_project.as_ref()?;
+        Some(self.children_range_for(departing))
     }
 
     pub fn has_same_expanded_structure(&self, other: &Self) -> bool {
-        match (&self.expanded_project, &other.expanded_project) {
-            (None, None) => true,
-            (Some(left), Some(right)) => {
-                left.project_index == right.project_index
-                    && left.path == right.path
-                    && left.visible_chat_count == right.visible_chat_count
-                    && left.has_pager() == right.has_pager()
+        fn same(left: &Option<ExpandedProject>, right: &Option<ExpandedProject>) -> bool {
+            match (left, right) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.project_index == right.project_index
+                        && left.path == right.path
+                        && left.visible_chat_count == right.visible_chat_count
+                        && left.has_pager() == right.has_pager()
+                }
+                _ => false,
             }
-            _ => false,
         }
+
+        same(&self.expanded_project, &other.expanded_project)
+            && same(&self.departing_project, &other.departing_project)
     }
 
     pub fn pagination_pager_index(&self, kind: &PaginateKind) -> Option<usize> {
@@ -182,7 +238,7 @@ impl SidebarRowDisplayStatus {
             PaginateKind::ProjectChats { path } => {
                 let expanded = self.expanded_project.as_ref()?;
                 (expanded.path == *path && expanded.has_pager())
-                    .then_some(1 + expanded.project_index + 1 + expanded.visible_chat_count)
+                    .then(|| self.children_range_for(expanded).start + expanded.visible_chat_count)
             }
         }
     }
@@ -205,13 +261,19 @@ impl SidebarRowDisplayStatus {
         projects: &[Project],
         projectless_chats: &[Chat],
         active_project_chats: &[Chat],
+        departing_project_chats: &[Chat],
     ) -> Option<SidebarRow<Project, Chat>> {
         if index >= self.len() {
             return None;
         }
 
         if index < self.project_section_len() {
-            return self.project_row(index, projects, active_project_chats);
+            return self.project_row(
+                index,
+                projects,
+                active_project_chats,
+                departing_project_chats,
+            );
         }
 
         let section_index = index - self.project_section_len();
@@ -239,41 +301,48 @@ impl SidebarRowDisplayStatus {
         index: usize,
         projects: &[Project],
         active_project_chats: &[Chat],
+        departing_project_chats: &[Chat],
     ) -> Option<SidebarRow<Project, Chat>> {
         if index == 0 {
             return Some(SidebarRow::SectionHeader { label: "Projects" });
         }
 
-        let child_range = self.expanded_children_range();
-        if let (Some(expanded), Some(child_range)) = (&self.expanded_project, &child_range)
-            && child_range.contains(&index)
-        {
-            let child_index = index - child_range.start;
-            if child_index < expanded.visible_chat_count {
-                return active_project_chats.get(child_index).cloned().map(|chat| {
-                    SidebarRow::Chat {
-                        project_index: expanded.project_index,
-                        chat_index: child_index,
-                        chat,
-                        selected: child_index == expanded.active_chat,
+        for (expanded, chats) in [
+            (self.expanded_project.as_ref(), active_project_chats),
+            (self.departing_project.as_ref(), departing_project_chats),
+        ] {
+            if let Some(expanded) = expanded {
+                let child_range = self.children_range_for(expanded);
+                if child_range.contains(&index) {
+                    let child_index = index - child_range.start;
+                    if child_index < expanded.visible_chat_count {
+                        return chats
+                            .get(child_index)
+                            .cloned()
+                            .map(|chat| SidebarRow::Chat {
+                                project_index: expanded.project_index,
+                                chat_index: child_index,
+                                chat,
+                                selected: expanded.project_index == self.active_project
+                                    && child_index == expanded.active_chat,
+                            });
                     }
-                });
+                    return expanded.has_pager().then(|| SidebarRow::ShowMore {
+                        kind: PaginateKind::ProjectChats {
+                            path: expanded.path.clone(),
+                        },
+                    });
+                }
             }
-            return expanded.has_pager().then(|| SidebarRow::ShowMore {
-                kind: PaginateKind::ProjectChats {
-                    path: expanded.path.clone(),
-                },
-            });
         }
 
-        let child_count = child_range.as_ref().map_or(0, |range| range.len());
-        let project_index = if let Some(range) = child_range
-            && index >= range.end
-        {
-            index.checked_sub(1 + child_count)?
-        } else {
-            index.checked_sub(1)?
-        };
+        let preceding_child_count = [&self.expanded_project, &self.departing_project]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .filter(|expanded| index >= self.children_range_for(expanded).end)
+            .map(ExpandedProject::child_count)
+            .sum::<usize>();
+        let project_index = index.checked_sub(1 + preceding_child_count)?;
         if project_index < self.visible_project_count {
             return projects
                 .get(project_index)
@@ -286,7 +355,11 @@ impl SidebarRowDisplayStatus {
                     expanded: self
                         .expanded_project
                         .as_ref()
-                        .is_some_and(|expanded| expanded.project_index == project_index),
+                        .is_some_and(|expanded| expanded.project_index == project_index)
+                        || self
+                            .departing_project
+                            .as_ref()
+                            .is_some_and(|expanded| expanded.project_index == project_index),
                 });
         }
 
@@ -296,11 +369,26 @@ impl SidebarRowDisplayStatus {
     }
 
     fn project_body_len(&self) -> usize {
-        self.visible_project_count
-            + self
-                .expanded_project
-                .as_ref()
-                .map_or(0, ExpandedProject::child_count)
+        self.visible_project_count + self.expanded_child_count()
+    }
+
+    fn expanded_child_count(&self) -> usize {
+        [&self.expanded_project, &self.departing_project]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .map(ExpandedProject::child_count)
+            .sum()
+    }
+
+    fn children_range_for(&self, expanded: &ExpandedProject) -> Range<usize> {
+        let preceding_child_count = [&self.expanded_project, &self.departing_project]
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .filter(|other| other.project_index < expanded.project_index)
+            .map(ExpandedProject::child_count)
+            .sum::<usize>();
+        let start = 1 + expanded.project_index + preceding_child_count + 1;
+        start..start + expanded.child_count()
     }
 
     fn has_project_pager(&self) -> bool {
@@ -324,7 +412,7 @@ mod tests {
     ) -> Vec<SidebarRow<Project, Chat>> {
         (0..rows.len())
             .map(|index| {
-                rows.row_at(index, projects, projectless, active_chats)
+                rows.row_at(index, projects, projectless, active_chats, &[])
                     .expect("every projected index should resolve")
             })
             .collect()
@@ -469,5 +557,81 @@ mod tests {
         assert_eq!(expanded.expanded_children_range(), Some(2..10));
         assert_eq!(collapsed.len(), 3);
         assert_eq!(collapsed.expanded_children_range(), None);
+    }
+
+    #[test]
+    fn temporarily_indexes_departing_and_arriving_project_children() {
+        let projects = vec!["one", "two", "three"];
+        let departing_chats = vec![10, 11];
+        let arriving_chats = vec![20, 21, 22];
+        let previous = SidebarRowDisplayStatus::new(
+            3,
+            3,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some("one".into()),
+            departing_chats.len(),
+            departing_chats.len(),
+            false,
+        );
+        let mut transitioning = SidebarRowDisplayStatus::new(
+            3,
+            3,
+            0,
+            0,
+            1,
+            0,
+            None,
+            Some("two".into()),
+            arriving_chats.len(),
+            arriving_chats.len(),
+            false,
+        );
+
+        assert!(transitioning.retain_departing_project_from(&previous, "one"));
+        assert_eq!(transitioning.departing_children_range(), Some(2..4));
+        assert_eq!(transitioning.active_project_row(), Some(4));
+        assert_eq!(transitioning.expanded_children_range(), Some(5..8));
+
+        let rows = (0..transitioning.len())
+            .map(|index| {
+                transitioning
+                    .row_at(
+                        index,
+                        &projects,
+                        &[] as &[i32],
+                        &arriving_chats,
+                        &departing_chats,
+                    )
+                    .expect("every transition row should resolve")
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            rows[2],
+            SidebarRow::Chat {
+                project_index: 0,
+                chat_index: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[4],
+            SidebarRow::Project {
+                project_index: 1,
+                expanded: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[5],
+            SidebarRow::Chat {
+                project_index: 1,
+                chat_index: 0,
+                ..
+            }
+        ));
     }
 }

@@ -34,6 +34,7 @@ pub struct Sidebar {
     list_state: ListState,
     list_active_project: Option<usize>,
     project_fold_animation: Option<ProjectFoldAnimation>,
+    departing_project_fold_animation: Option<ProjectFoldAnimation>,
     project_fold_generation: u64,
     pending_project_expansion: Option<String>,
     observed_active_project: Option<Entity<ProjectState>>,

@@ -59,7 +59,15 @@ impl Sidebar {
     }
 
     pub(super) fn toggle_project(&mut self, index: usize, cx: &mut Context<Self>) {
-        let (path, is_active) = {
+        if let Some(generation) = self
+            .departing_project_fold_animation
+            .as_ref()
+            .map(|animation| animation.generation)
+        {
+            self.finish_departing_project_fold_animation(generation, cx);
+        }
+
+        let (path, is_active, active_project_path) = {
             let state = self.state.read(cx);
             let Some(project) = state.projects.get(index) else {
                 return;
@@ -67,6 +75,9 @@ impl Sidebar {
             (
                 project.read(cx).path.to_string(),
                 index == state.active_project && state.active_projectless_chat.is_none(),
+                state
+                    .active_project()
+                    .map(|project| project.read(cx).path.to_string()),
             )
         };
 
@@ -99,6 +110,36 @@ impl Sidebar {
             }
             return;
         }
+
+        self.collapsed_projects.remove(&path);
+        if let Some(active_project_path) = active_project_path
+            && self.display_status.expanded_project_path() == Some(active_project_path.as_str())
+            && !cx.reduce_motion()
+        {
+            let from = self
+                .project_fold_animation
+                .take()
+                .as_ref()
+                .filter(|animation| animation.project_path == active_project_path)
+                .map_or(1., ProjectFoldAnimation::current);
+            self.start_departing_project_fold_animation(active_project_path, from, cx);
+            self.select_and_expand_project(path, cx);
+            return;
+        }
+
+        self.select_and_expand_project(path, cx);
+    }
+
+    pub(super) fn select_and_expand_project(&mut self, path: String, cx: &mut Context<Self>) {
+        let index = self
+            .state
+            .read(cx)
+            .projects
+            .iter()
+            .position(|project| project.read(cx).path.as_ref() == path.as_str());
+        let Some(index) = index else {
+            return;
+        };
 
         self.collapsed_projects.remove(&path);
         self.pending_project_expansion = Some(path);
@@ -140,6 +181,34 @@ impl Sidebar {
             cx.background_executor().timer(duration).await;
             let _ = this.update(cx, |view, cx| {
                 view.finish_project_fold_animation(generation, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn start_departing_project_fold_animation(
+        &mut self,
+        project_path: String,
+        from: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_fold_generation = self.project_fold_generation.wrapping_add(1);
+        let animation =
+            ProjectFoldAnimation::new(project_path, self.project_fold_generation, from, false);
+        let generation = animation.generation;
+        let duration = animation.duration;
+        self.departing_project_fold_animation = Some(animation);
+
+        if duration.is_zero() {
+            self.finish_departing_project_fold_animation(generation, cx);
+            return;
+        }
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration).await;
+            let _ = this.update(cx, |view, cx| {
+                view.finish_departing_project_fold_animation(generation, cx)
             });
         })
         .detach();

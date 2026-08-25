@@ -29,6 +29,7 @@ impl Sidebar {
                 .with_uniform_item_height(SIDEBAR_ROW_HEIGHT),
             list_active_project: None,
             project_fold_animation: None,
+            departing_project_fold_animation: None,
             project_fold_generation: 0,
             pending_project_expansion: None,
             observed_active_project: None,
