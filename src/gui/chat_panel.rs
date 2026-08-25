@@ -13,6 +13,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement,
+    spinner::Spinner,
 };
 
 pub struct ChatPanel {
@@ -626,21 +627,51 @@ impl ChatPanel {
                     ),
             )
     }
+
+    fn loading_thread_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(Spinner::new().small().color(cx.theme().muted_foreground))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Loading thread…"),
+            )
+    }
 }
 
 impl Render for ChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let new_chat_open =
             self.state.read(cx).active_project().is_some() && self.ui_state.read(cx).new_chat_open;
-        let (title, subtitle) = self
-            .state
-            .read(cx)
-            .active_chat_entity(cx)
+        let active_chat = self.state.read(cx).active_chat_entity(cx);
+        let (title, subtitle, active_thread_id) = active_chat
             .map(|chat| {
                 let chat = chat.read(cx);
-                (chat.title.to_string(), chat.subtitle.to_string())
+                (
+                    chat.title.to_string(),
+                    chat.subtitle.to_string(),
+                    Some(chat.id.clone()),
+                )
             })
-            .unwrap_or_else(|| ("No thread selected".into(), "Start a Codex thread".into()));
+            .unwrap_or_else(|| {
+                (
+                    "No thread selected".into(),
+                    "Start a Codex thread".into(),
+                    None,
+                )
+            });
+        let thread_loading = !new_chat_open
+            && active_thread_id.as_ref().is_some_and(|thread_id| {
+                self.ui_state.read(cx).loading_thread_id.as_ref() == Some(thread_id)
+            });
 
         div()
             .flex_1()
@@ -737,7 +768,10 @@ impl Render for ChatPanel {
                     ),
             )
             .when(new_chat_open, |this| this.child(self.new_chat_page(cx)))
-            .when(!new_chat_open, |this| {
+            .when(thread_loading, |this| {
+                this.child(self.loading_thread_page(cx))
+            })
+            .when(!new_chat_open && !thread_loading, |this| {
                 this.child(
                     div()
                         .flex_1()

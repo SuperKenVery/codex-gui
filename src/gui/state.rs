@@ -792,6 +792,7 @@ pub struct UiState {
     pub side_chat_open: bool,
     pub new_chat_open: bool,
     pub active_turn: Option<ActiveTurn>,
+    pub loading_thread_id: Option<String>,
 }
 
 impl UiState {
@@ -800,6 +801,7 @@ impl UiState {
             side_chat_open: false,
             new_chat_open: true,
             active_turn: None,
+            loading_thread_id: None,
         }
     }
 
@@ -829,6 +831,16 @@ impl UiState {
 
     pub fn clear_active_turn(&mut self) {
         self.active_turn = None;
+    }
+
+    pub fn begin_thread_load(&mut self, thread_id: String) {
+        self.loading_thread_id = Some(thread_id);
+    }
+
+    pub fn finish_thread_load(&mut self, thread_id: &str) {
+        if self.loading_thread_id.as_deref() == Some(thread_id) {
+            self.loading_thread_id = None;
+        }
     }
 }
 

@@ -74,10 +74,16 @@ impl CodexGui {
 
         if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
             tracing::info!(thread_id, "loading thread");
+            self.ui_state.update(cx, |state, cx| {
+                state.begin_thread_load(thread_id.clone());
+                cx.notify();
+            });
             let bridge = self.bridge.clone();
             cx.spawn(async move |this, cx| {
-                let result = bridge.resume_thread(thread_id).await;
-                let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+                let result = bridge.resume_thread(thread_id.clone()).await;
+                let _ = this.update(cx, |view, cx| {
+                    view.apply_thread_resumed_result(&thread_id, result, cx)
+                });
             })
             .detach();
         }
@@ -102,10 +108,16 @@ impl CodexGui {
 
         if let Some(thread_id) = thread_id.filter(|thread_id| thread_id != "empty") {
             tracing::info!(thread_id, "loading thread");
+            self.ui_state.update(cx, |state, cx| {
+                state.begin_thread_load(thread_id.clone());
+                cx.notify();
+            });
             let bridge = self.bridge.clone();
             cx.spawn(async move |this, cx| {
-                let result = bridge.resume_thread(thread_id).await;
-                let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+                let result = bridge.resume_thread(thread_id.clone()).await;
+                let _ = this.update(cx, |view, cx| {
+                    view.apply_thread_resumed_result(&thread_id, result, cx)
+                });
             })
             .detach();
         }

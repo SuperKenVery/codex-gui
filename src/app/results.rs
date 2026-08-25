@@ -137,10 +137,16 @@ impl CodexGui {
                 });
             }
             tracing::info!(thread_id, "loading thread");
+            self.ui_state.update(cx, |state, cx| {
+                state.begin_thread_load(thread_id.clone());
+                cx.notify();
+            });
             let bridge = self.bridge.clone();
             cx.spawn(async move |this, cx| {
-                let result = bridge.resume_thread(thread_id).await;
-                let _ = this.update(cx, |view, cx| view.apply_thread_resumed_result(result, cx));
+                let result = bridge.resume_thread(thread_id.clone()).await;
+                let _ = this.update(cx, |view, cx| {
+                    view.apply_thread_resumed_result(&thread_id, result, cx)
+                });
             })
             .detach();
         }
@@ -241,6 +247,7 @@ impl CodexGui {
 
     pub(super) fn apply_thread_resumed_result(
         &mut self,
+        requested_thread_id: &str,
         result: Result<Thread, BridgeError>,
         cx: &mut Context<Self>,
     ) {
@@ -248,6 +255,10 @@ impl CodexGui {
             Ok(thread) => self.apply_thread_resumed(thread, cx),
             Err(err) => self.apply_bridge_error(err.to_string(), cx),
         }
+        self.ui_state.update(cx, |state, cx| {
+            state.finish_thread_load(requested_thread_id);
+            cx.notify();
+        });
     }
 
     pub(super) fn apply_unit_result(
