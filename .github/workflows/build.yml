@@ -112,7 +112,6 @@ jobs:
     runs-on: macos-15
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v7
       - name: Install Nix
@@ -133,30 +132,60 @@ jobs:
           test -d "verify-macos/Codex GUI.app/Contents/Frameworks"
           codesign --verify --deep --strict "verify-macos/Codex GUI.app"
           file "verify-macos/Codex GUI.app/Contents/MacOS/"*
-      - name: Configure oranc upload credentials
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        env:
-          ORANC_USERNAME: x-access-token
-          ORANC_PASSWORD: ${{ github.token }}
-          ORANC_SIGNING_KEY: ${{ secrets.ORANC_SIGNING_KEY }}
-        run: |
-          encoded=$(printf '%s' "$ORANC_USERNAME:$ORANC_PASSWORD" | base64 | tr -d '\n')
-          echo "AWS_ACCESS_KEY_ID=$encoded" >> "$GITHUB_ENV"
-          echo "AWS_SECRET_ACCESS_KEY=_" >> "$GITHUB_ENV"
-          printf '%s' "$ORANC_SIGNING_KEY" > "$RUNNER_TEMP/oranc-signing-key"
-          nix store sign --recursive --key-file "$RUNNER_TEMP/oranc-signing-key" ./result-macos
-      - name: Publish macOS closure to GHCR Nix cache
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        run: >-
-          nix copy
-          --to "s3://${ORANC_CACHE_REPOSITORY}?endpoint=https://oranc.li7g.com/ghcr.io/${{ github.repository_owner }}"
-          ./result-macos
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
           name: codex-gui-macos-aarch64
           path: dist/*.zip
           if-no-files-found: error
+      - name: Stage macOS package for GHCR Nix cache
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          nix build --accept-flake-config .#codex-gui --out-link result-package
+          nix copy --to "file://$RUNNER_TEMP/macos-nix-cache" ./result-package
+      - name: Upload macOS Nix cache transfer
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: internal-macos-nix-cache-${{ github.run_id }}
+          path: ${{ runner.temp }}/macos-nix-cache
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-macos-nix-cache:
+    needs:
+      - initialize-nix-cache
+      - macos-arm64
+    if: >-
+      always() &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.initialize-nix-cache.result == 'success' &&
+      needs.macos-arm64.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    services:
+      oranc:
+        image: ghcr.io/linyinfeng/oranc:latest
+    steps:
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Use GHCR Nix cache
+        uses: linyinfeng/oranc-action@v1
+        with:
+          orancServerContainer: ${{ job.services.oranc.id }}
+          repositoryPart2: ${{ env.ORANC_CACHE_REPOSITORY }}
+          signingKey: ${{ secrets.ORANC_SIGNING_KEY }}
+      - name: Download macOS Nix cache transfer
+        uses: actions/download-artifact@v8
+        with:
+          name: internal-macos-nix-cache-${{ github.run_id }}
+          path: macos-nix-cache
+      - name: Import macOS package closure
+        run: nix copy --all --from "file://$GITHUB_WORKSPACE/macos-nix-cache" --no-check-sigs
 
   windows:
     strategy:
