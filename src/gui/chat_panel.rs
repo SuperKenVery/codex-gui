@@ -8,7 +8,7 @@ use gpui::{
     WeakEntity, Window, WindowControlArea, div, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IconName, Selectable as _, Side, Sizable as _,
+    ActiveTheme as _, IconName, Selectable as _, Side, Sizable as _, box_shadow,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -308,7 +308,13 @@ impl ChatPanel {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().input_background())
-            .shadow_sm()
+            .shadow(vec![box_shadow(
+                0.,
+                4.,
+                12.,
+                2.,
+                cx.theme().transparent.alpha(0.1),
+            )])
             .p_2()
             .flex()
             .flex_col()
