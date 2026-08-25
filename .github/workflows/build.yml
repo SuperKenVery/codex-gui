@@ -24,7 +24,7 @@ jobs:
       oranc:
         image: ghcr.io/linyinfeng/oranc:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Nix
         uses: cachix/install-nix-action@v31
         with:
@@ -61,7 +61,7 @@ jobs:
       oranc:
         image: ghcr.io/linyinfeng/oranc:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Nix
         uses: cachix/install-nix-action@v31
         with:
@@ -97,7 +97,7 @@ jobs:
           test "$(dirname "$(readlink -f result-package/bin/codex-gui)")" = \
                "$(dirname "$(readlink -f result-package/bin/codex-code-mode-host)")"
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codex-gui-linux-${{ matrix.artifact-arch }}
           path: dist/*
@@ -114,7 +114,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Nix
         uses: cachix/install-nix-action@v31
         with:
@@ -152,7 +152,7 @@ jobs:
           --to "s3://${ORANC_CACHE_REPOSITORY}?endpoint=https://oranc.li7g.com/ghcr.io/${{ github.repository_owner }}"
           ./result-macos
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codex-gui-macos-aarch64
           path: dist/*.zip
@@ -173,7 +173,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -203,7 +203,7 @@ jobs:
           if (-not (Test-Path "dist/$package/codex-code-mode-host.exe" -PathType Leaf)) { throw "codex-code-mode-host.exe is missing" }
           Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: codex-gui-windows-${{ matrix.artifact-arch }}
           path: dist/*.zip

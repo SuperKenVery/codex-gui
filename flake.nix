@@ -54,6 +54,19 @@
             extensions = [ "rust-src" ];
           };
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          source = craneLib.cleanCargoSource ./.;
+          dependencyDummySrc = craneLib.mkDummySrc {
+            src = source;
+            extraDummyScript = ''
+              # codex-code-mode-host is a git dependency which imports the API
+              # of this local [patch] replacement. Keep this one local crate's
+              # implementation available while Crane stubs the application.
+              rm -rf "$out/crates/codex-code-mode-runtime-quickjs/src"
+              cp -R \
+                ${./crates/codex-code-mode-runtime-quickjs/src} \
+                "$out/crates/codex-code-mode-runtime-quickjs/src"
+            '';
+          };
           linuxRuntimeLibs = with pkgs; [
             libglvnd
             vulkan-loader
@@ -71,7 +84,7 @@
           commonArgs = {
             pname = "codex-gui";
             inherit version;
-            src = craneLib.cleanCargoSource ./.;
+            src = source;
             strictDeps = true;
             nativeBuildInputs =
               with pkgs;
@@ -124,7 +137,12 @@
               platforms = lib.platforms.linux ++ lib.platforms.darwin;
             };
           };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+          cargoArtifacts = craneLib.buildDepsOnly (
+            commonArgs
+            // {
+              dummySrc = dependencyDummySrc;
+            }
+          );
           codex-gui = craneLib.buildPackage (
             commonArgs
             // {
