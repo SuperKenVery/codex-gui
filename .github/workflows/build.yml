@@ -143,6 +143,7 @@ jobs:
         run: |
           nix build --accept-flake-config .#codex-gui --out-link result-package
           nix copy --to "file://$RUNNER_TEMP/macos-nix-cache" ./result-package
+          readlink result-package > "$RUNNER_TEMP/macos-nix-cache/root-store-path"
       - name: Upload macOS Nix cache transfer
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
@@ -185,7 +186,14 @@ jobs:
           name: internal-macos-nix-cache-${{ github.run_id }}
           path: macos-nix-cache
       - name: Import macOS package closure
-        run: nix copy --all --from "file://$GITHUB_WORKSPACE/macos-nix-cache" --no-check-sigs
+        run: |
+          root_store_path=$(cat macos-nix-cache/root-store-path)
+          nix copy \
+            --from "file://$GITHUB_WORKSPACE/macos-nix-cache" \
+            --no-check-sigs \
+            "$root_store_path"
+          test -x "$root_store_path/bin/codex-gui"
+          test -x "$root_store_path/bin/codex-code-mode-host"
 
   windows:
     strategy:
