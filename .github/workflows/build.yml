@@ -15,7 +15,14 @@ env:
 
 jobs:
   initialize-nix-cache:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # Repository branches may publish cache entries. Fork PRs still consume
+    # the public substituter from flake.nix, but never receive signing secrets.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,7 +74,7 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Use GHCR Nix cache
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: needs.initialize-nix-cache.result == 'success'
         uses: linyinfeng/oranc-action@v1
         with:
           orancServerContainer: ${{ job.services.oranc.id }}
@@ -139,13 +146,13 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
       - name: Stage macOS package for GHCR Nix cache
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: needs.initialize-nix-cache.result == 'success'
         run: |
           nix build --accept-flake-config .#codex-gui --out-link result-package
           nix copy --to "file://$RUNNER_TEMP/macos-nix-cache" ./result-package
           readlink result-package > "$RUNNER_TEMP/macos-nix-cache/root-store-path"
       - name: Upload macOS Nix cache transfer
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        if: needs.initialize-nix-cache.result == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: internal-macos-nix-cache-${{ github.run_id }}
@@ -159,7 +166,6 @@ jobs:
       - macos-arm64
     if: >-
       always() &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.initialize-nix-cache.result == 'success' &&
       needs.macos-arm64.result == 'success'
     runs-on: ubuntu-latest
