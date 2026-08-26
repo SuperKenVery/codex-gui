@@ -10,12 +10,12 @@ use codex_app_server_client::{
 use codex_app_server_protocol::{
     ApprovalsReviewer, AskForApproval, ClientRequest, ConfigWarningNotification, JSONRPCErrorError,
     ModelListParams, ModelListResponse, PermissionProfileListParams, PermissionProfileListResponse,
-    RequestId, ServerNotification, SortDirection, Thread, ThreadDeleteParams, ThreadDeleteResponse,
-    ThreadForkParams, ThreadForkResponse, ThreadListParams, ThreadListResponse, ThreadResumeParams,
-    ThreadResumeResponse, ThreadSettingsUpdateParams, ThreadSettingsUpdateResponse, ThreadSortKey,
-    ThreadSource, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
-    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
-    UserInput,
+    RequestId, ServerNotification, ServerRequest, SortDirection, Thread, ThreadDeleteParams,
+    ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse, ThreadListParams,
+    ThreadListResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSettingsUpdateParams,
+    ThreadSettingsUpdateResponse, ThreadSortKey, ThreadSource, ThreadStartParams,
+    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
+    TurnStartResponse, TurnSteerParams, TurnSteerResponse, UserInput,
 };
 use codex_arg0::Arg0DispatchPaths;
 use codex_protocol::{openai_models::ReasoningEffort, protocol::SessionSource};
@@ -29,7 +29,7 @@ use std::{
 };
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
 };
 
 #[derive(Clone)]
@@ -42,6 +42,20 @@ struct BridgeInner {
     shutdown_tx: watch::Sender<bool>,
     next_request_id: AtomicI64,
     muted_thread_notifications: Arc<AtomicUsize>,
+    server_response_tx: mpsc::UnboundedSender<ServerResponseCommand>,
+}
+
+enum ServerResponseCommand {
+    Resolve {
+        request_id: RequestId,
+        result: serde_json::Value,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+    Reject {
+        request_id: RequestId,
+        error: JSONRPCErrorError,
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 pub struct ThreadNotificationMute {
@@ -71,6 +85,7 @@ enum ClientState {
 
 pub enum BridgeEvent {
     Notification(ServerNotification),
+    ServerRequest(ServerRequest),
     TransportError(String),
     Lagged { skipped: usize },
 }
@@ -103,6 +118,7 @@ pub fn start_app_server_bridge(
     let (client_state_tx, client_state_rx) = watch::channel(ClientState::Starting);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (server_response_tx, server_response_rx) = mpsc::unbounded_channel();
     let muted_thread_notifications = Arc::new(AtomicUsize::new(0));
 
     runtime.spawn(run_embedded_app_server(
@@ -110,6 +126,7 @@ pub fn start_app_server_bridge(
         client_state_tx,
         shutdown_rx,
         event_tx,
+        server_response_rx,
         muted_thread_notifications.clone(),
     ));
 
@@ -120,6 +137,7 @@ pub fn start_app_server_bridge(
                 shutdown_tx,
                 next_request_id: AtomicI64::new(1),
                 muted_thread_notifications,
+                server_response_tx,
             }),
         },
         event_rx,
@@ -152,6 +170,50 @@ impl AppServerBridge {
                 return;
             }
         }
+    }
+
+    pub async fn resolve_server_request(
+        &self,
+        request_id: RequestId,
+        result: serde_json::Value,
+    ) -> BridgeResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.inner
+            .server_response_tx
+            .send(ServerResponseCommand::Resolve {
+                request_id,
+                result,
+                response_tx,
+            })
+            .map_err(|_| BridgeError::Transport("app-server bridge is closed".into()))?;
+        response_rx
+            .await
+            .map_err(|_| BridgeError::Transport("app-server response channel closed".into()))?
+            .map_err(BridgeError::Transport)
+    }
+
+    pub async fn reject_server_request(
+        &self,
+        request_id: RequestId,
+        message: String,
+    ) -> BridgeResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.inner
+            .server_response_tx
+            .send(ServerResponseCommand::Reject {
+                request_id,
+                error: JSONRPCErrorError {
+                    code: -32000,
+                    message,
+                    data: None,
+                },
+                response_tx,
+            })
+            .map_err(|_| BridgeError::Transport("app-server bridge is closed".into()))?;
+        response_rx
+            .await
+            .map_err(|_| BridgeError::Transport("app-server response channel closed".into()))?
+            .map_err(BridgeError::Transport)
     }
 
     pub async fn list_threads(&self) -> BridgeResult<Vec<Thread>> {
@@ -447,6 +509,7 @@ async fn run_embedded_app_server(
     client_state: watch::Sender<ClientState>,
     mut shutdown: watch::Receiver<bool>,
     events: mpsc::UnboundedSender<BridgeEvent>,
+    mut server_responses: mpsc::UnboundedReceiver<ServerResponseCommand>,
     muted_thread_notifications: Arc<AtomicUsize>,
 ) {
     let mut client = match build_embedded_client(arg0_paths).await {
@@ -463,6 +526,27 @@ async fn run_embedded_app_server(
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
+                }
+            }
+            command = server_responses.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    ServerResponseCommand::Resolve { request_id, result, response_tx } => {
+                        let result = client
+                            .resolve_server_request(request_id, result)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = response_tx.send(result);
+                    }
+                    ServerResponseCommand::Reject { request_id, error, response_tx } => {
+                        let result = client
+                            .reject_server_request(request_id, error)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = response_tx.send(result);
+                    }
                 }
             }
             event = client.next_event() => {
@@ -488,22 +572,7 @@ async fn run_embedded_app_server(
                         }
                     }
                     InProcessServerEvent::ServerRequest(request) => {
-                        let message = format!("unsupported app-server request: {request:?}");
-                        let error = JSONRPCErrorError {
-                            code: -32601,
-                            message: message.clone(),
-                            data: None,
-                        };
-                        if let Err(reject_error) = client
-                            .reject_server_request(request.id().clone(), error)
-                            .await
-                        {
-                            let _ = events.send(BridgeEvent::TransportError(format!(
-                                "{message}; failed to reject it: {reject_error}",
-                            )));
-                        } else {
-                            let _ = events.send(BridgeEvent::TransportError(message));
-                        }
+                        let _ = events.send(BridgeEvent::ServerRequest(*request));
                     }
                     InProcessServerEvent::Lagged { skipped } => {
                         let _ = events.send(BridgeEvent::Lagged { skipped });

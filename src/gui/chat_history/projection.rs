@@ -1,12 +1,12 @@
 use std::{collections::HashSet, time::Duration};
 
-use codex_app_server_protocol::{ThreadItem, Turn, TurnStatus, UserInput};
+use codex_app_server_protocol::{ThreadItem, Turn, TurnPlanStepStatus, TurnStatus, UserInput};
 use codex_protocol::models::MessagePhase;
 
 use crate::gui::{ChatState, PendingUserMessageDelivery};
 
 use super::{
-    blocks::{HistoryBlock, UserMessageDelivery, is_tool_item, tool_call_views, tools_done},
+    blocks::{HistoryBlock, UserMessageDelivery, is_tool_item, tool_calls, tools_done},
     transcript::TranscriptSnapshot,
 };
 
@@ -28,6 +28,34 @@ pub(super) fn build_transcript(
                 expanded_turns,
                 expanded_tool_groups,
             );
+            if !turn
+                .items
+                .iter()
+                .any(|item| matches!(item, ThreadItem::Plan { .. }))
+                && let Some(plan) = chat.turn_plans.get(&turn.id)
+            {
+                let mut body = String::new();
+                if let Some(explanation) = &plan.explanation {
+                    body.push_str(explanation);
+                    body.push_str("\n\n");
+                }
+                for step in &plan.steps {
+                    let marker = match step.status {
+                        TurnPlanStepStatus::Pending => "○",
+                        TurnPlanStepStatus::InProgress => "◉",
+                        TurnPlanStepStatus::Completed => "●",
+                    };
+                    body.push_str(&format!("{marker} {}\n", step.step));
+                }
+                transcript.push_block(HistoryBlock::Plan {
+                    key: format!("turn-plan-{}", turn.id),
+                    body: body.trim_end().to_string().into(),
+                    running: plan
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step.status, TurnPlanStepStatus::InProgress)),
+                });
+            }
             previous_turn_id = Some(turn.id.as_str());
         }
     }
@@ -53,6 +81,18 @@ pub(super) fn build_transcript(
         transcript.push_block(HistoryBlock::Notice {
             key: notice.id.clone(),
             body: notice.body.clone(),
+        });
+    }
+
+    for approval in &chat.pending_approvals {
+        transcript.push_block(HistoryBlock::Approval {
+            approval: approval.clone(),
+        });
+    }
+
+    for request in &chat.pending_inputs {
+        transcript.push_block(HistoryBlock::InputRequest {
+            request: request.clone(),
         });
     }
 
@@ -156,14 +196,108 @@ fn append_items(
                 );
                 index = tools_end;
             }
+            ThreadItem::Plan { id, text } => {
+                transcript.push_block(HistoryBlock::Plan {
+                    key: id.clone(),
+                    body: text.clone().into(),
+                    running: chat.item_is_streaming(id),
+                });
+                index += 1;
+            }
+            ThreadItem::Reasoning {
+                id,
+                summary,
+                content,
+            } => {
+                let mut body = summary
+                    .iter()
+                    .filter(|part| !part.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let content = content
+                    .iter()
+                    .filter(|part| !part.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !content.is_empty() {
+                    if !body.is_empty() {
+                        body.push_str("\n\n");
+                    }
+                    body.push_str(&content);
+                }
+                transcript.push_block(HistoryBlock::Reasoning {
+                    key: id.clone(),
+                    body: body.into(),
+                    running: chat.item_is_streaming(id),
+                });
+                index += 1;
+            }
+            ThreadItem::HookPrompt { id, fragments } => {
+                transcript.push_block(HistoryBlock::HookPrompt {
+                    key: id.clone(),
+                    body: fragments
+                        .iter()
+                        .map(|fragment| fragment.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .into(),
+                });
+                index += 1;
+            }
+            ThreadItem::SubAgentActivity {
+                id,
+                kind,
+                agent_path,
+                ..
+            } => {
+                transcript.push_block(HistoryBlock::Activity {
+                    key: id.clone(),
+                    title: format!("Sub-agent {kind:?}").into(),
+                    body: agent_path.clone().into(),
+                    running: false,
+                });
+                index += 1;
+            }
+            ThreadItem::EnteredReviewMode { id, review } => {
+                transcript.push_block(HistoryBlock::Activity {
+                    key: id.clone(),
+                    title: "Entered review mode".into(),
+                    body: review.clone().into(),
+                    running: false,
+                });
+                index += 1;
+            }
+            ThreadItem::ExitedReviewMode { id, review } => {
+                transcript.push_block(HistoryBlock::Activity {
+                    key: id.clone(),
+                    title: "Exited review mode".into(),
+                    body: review.clone().into(),
+                    running: false,
+                });
+                index += 1;
+            }
+            ThreadItem::ContextCompaction { id } => {
+                transcript.push_block(HistoryBlock::Activity {
+                    key: id.clone(),
+                    title: "Context compacted".into(),
+                    body: "Older conversation context was summarized to continue working.".into(),
+                    running: false,
+                });
+                index += 1;
+            }
             item if is_tool_item(item) => {
                 let tools_end = consecutive_tools_end(items, index);
                 append_tool_group(
                     transcript,
+                    chat,
                     item.id(),
                     &items[index..tools_end],
                     tools_end == items.len()
-                        && !tools_done(&items[index..tools_end].iter().collect::<Vec<_>>()),
+                        && !tools_done(&items[index..tools_end].iter().collect::<Vec<_>>(), |id| {
+                            chat.item_is_streaming(id)
+                        }),
                     expanded_tool_groups,
                 );
                 index = tools_end;
@@ -204,9 +338,13 @@ fn append_agent(
     if !tools.is_empty() {
         append_tool_group(
             transcript,
+            chat,
             id,
             tools,
-            tool_group_at_tail && !tools_done(&tools.iter().collect::<Vec<_>>()),
+            tool_group_at_tail
+                && !tools_done(&tools.iter().collect::<Vec<_>>(), |id| {
+                    chat.item_is_streaming(id)
+                }),
             expanded_tool_groups,
         );
     }
@@ -214,6 +352,7 @@ fn append_agent(
 
 fn append_tool_group(
     transcript: &mut TranscriptSnapshot,
+    chat: &ChatState,
     key: &str,
     tools: &[ThreadItem],
     active_tail: bool,
@@ -222,7 +361,9 @@ fn append_tool_group(
     let tool_refs = tools.iter().collect::<Vec<_>>();
     transcript.push_block(HistoryBlock::ToolGroup {
         key: key.to_string(),
-        tools: tool_call_views(&tool_refs),
+        tools: tool_calls(&tool_refs, &chat.tool_progress, |id| {
+            chat.item_is_streaming(id)
+        }),
         expanded: expanded_tool_groups.contains(key),
         collapsible: true,
         active_tail,
@@ -290,7 +431,7 @@ fn completed_turn_fold(turn: &Turn) -> Option<TurnFold> {
         .iter()
         .filter(|item| is_tool_item(item))
         .collect::<Vec<_>>();
-    if !tools.is_empty() && !tools_done(&tools) {
+    if !tools.is_empty() && !tools_done(&tools, |_| false) {
         return None;
     }
 
@@ -324,10 +465,17 @@ fn is_final_answer(phase: Option<&MessagePhase>) -> bool {
 fn user_input_text(content: &[UserInput]) -> String {
     content
         .iter()
-        .filter_map(|input| match input {
-            UserInput::Text { text, .. } => Some(text.as_str()),
-            _ => None,
+        .map(|input| match input {
+            UserInput::Text { text, .. } => text.clone(),
+            UserInput::Image { url, .. } => format!("[Image: {url}]"),
+            UserInput::LocalImage { path, .. } => format!("[Image: {}]", path.display()),
+            UserInput::Audio { url } => format!("[Audio: {url}]"),
+            UserInput::LocalAudio { path } => format!("[Audio: {}]", path.display()),
+            UserInput::Skill { name, path } => {
+                format!("[Skill: {name} ({})]", path.display())
+            }
+            UserInput::Mention { name, path } => format!("[Mention: {name} ({path})]"),
         })
-        .collect::<Vec<_>>()
+        .collect::<Vec<String>>()
         .join("\n")
 }

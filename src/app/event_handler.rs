@@ -10,6 +10,7 @@ impl CodexGui {
             BridgeEvent::Notification(notification) => {
                 self.apply_server_notification(notification, cx)
             }
+            BridgeEvent::ServerRequest(request) => self.apply_server_request(request, cx),
             BridgeEvent::TransportError(message) => self.apply_bridge_error(message, cx),
             BridgeEvent::Lagged { skipped } => {
                 self.apply_bridge_error(
@@ -60,6 +61,34 @@ impl CodexGui {
                     cx,
                 );
             }
+            ServerNotification::PlanDelta(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.append_plan_delta(&params.item_id, &params.delta)
+                });
+            }
+            ServerNotification::ReasoningSummaryTextDelta(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.append_reasoning_summary_delta(
+                        &params.item_id,
+                        params.summary_index,
+                        &params.delta,
+                    )
+                });
+            }
+            ServerNotification::ReasoningSummaryPartAdded(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.add_reasoning_summary_part(&params.item_id, params.summary_index)
+                });
+            }
+            ServerNotification::ReasoningTextDelta(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.append_reasoning_content_delta(
+                        &params.item_id,
+                        params.content_index,
+                        &params.delta,
+                    )
+                });
+            }
             ServerNotification::CommandExecutionOutputDelta(params) => {
                 self.append_thread_command_output_delta(
                     &params.thread_id,
@@ -84,8 +113,26 @@ impl CodexGui {
                     cx,
                 );
             }
+            ServerNotification::McpToolCallProgress(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.append_tool_progress(&params.item_id, params.message)
+                });
+            }
+            ServerNotification::TerminalInteraction(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.append_tool_progress(
+                        &params.item_id,
+                        format!("Sent terminal input: {}", params.stdin),
+                    )
+                });
+            }
             ServerNotification::ItemCompleted(params) => {
-                self.complete_thread_item(&params.thread_id, params.item, cx);
+                self.complete_thread_item(&params.thread_id, &params.turn_id, params.item, cx);
+            }
+            ServerNotification::TurnPlanUpdated(params) => {
+                self.update_chat(&params.thread_id, cx, |chat| {
+                    chat.update_turn_plan(params.turn_id, params.explanation, params.plan)
+                });
             }
             ServerNotification::ThreadStatusChanged(params) => {
                 self.update_thread_status(&params.thread_id, params.status.clone(), cx);
@@ -99,18 +146,348 @@ impl CodexGui {
                 let turn = params.turn;
                 let thread_id = params.thread_id;
                 let turn_id = turn.id.clone();
+                let turn_error = turn.error.as_ref().map(|error| error.message.clone());
                 self.complete_thread_turn(&thread_id, turn, cx);
                 self.ui_state.update(cx, |state, cx| {
                     state.finish_turn(&thread_id, &turn_id);
                     cx.notify();
                 });
                 tracing::info!(thread_id, turn_id, "turn complete");
+                if let Some(error) = turn_error {
+                    self.apply_thread_error(&thread_id, &turn_id, error, false, cx);
+                }
             }
             ServerNotification::Error(params) => {
-                self.apply_bridge_error(params.error.message, cx);
+                self.apply_thread_error(
+                    &params.thread_id,
+                    &params.turn_id,
+                    params.error.message,
+                    params.will_retry,
+                    cx,
+                );
             }
-            _ => {}
+            ServerNotification::Warning(params) => {
+                self.apply_targeted_notice(
+                    params.thread_id.as_deref(),
+                    &format!("warning-{}", uuid::Uuid::new_v4()),
+                    params.message,
+                    cx,
+                );
+            }
+            ServerNotification::GuardianWarning(params) => {
+                self.apply_targeted_notice(
+                    Some(&params.thread_id),
+                    &format!("guardian-warning-{}", uuid::Uuid::new_v4()),
+                    params.message,
+                    cx,
+                );
+            }
+            ServerNotification::ConfigWarning(params) => {
+                let body = params
+                    .details
+                    .map(|details| format!("{}\n\n{details}", params.summary))
+                    .unwrap_or(params.summary);
+                self.apply_targeted_notice(
+                    None,
+                    &format!("config-warning-{}", uuid::Uuid::new_v4()),
+                    body,
+                    cx,
+                );
+            }
+            ServerNotification::DeprecationNotice(params) => {
+                let body = params
+                    .details
+                    .map(|details| format!("{}\n\n{details}", params.summary))
+                    .unwrap_or(params.summary);
+                self.apply_targeted_notice(
+                    None,
+                    &format!("deprecation-{}", uuid::Uuid::new_v4()),
+                    body,
+                    cx,
+                );
+            }
+            ServerNotification::ModelRerouted(params) => {
+                self.apply_targeted_notice(
+                    Some(&params.thread_id),
+                    &format!("model-rerouted-{}", params.turn_id),
+                    format!(
+                        "Model rerouted from {} to {}: {:?}",
+                        params.from_model, params.to_model, params.reason
+                    ),
+                    cx,
+                );
+            }
+            ServerNotification::ModelVerification(params) => {
+                self.apply_targeted_notice(
+                    Some(&params.thread_id),
+                    &format!("model-verification-{}", params.turn_id),
+                    format!("Model verification: {:?}", params.verifications),
+                    cx,
+                );
+            }
+            ServerNotification::ModelSafetyBufferingUpdated(params) => {
+                if params.show_buffering_ui {
+                    self.apply_targeted_notice(
+                        Some(&params.thread_id),
+                        &format!("model-safety-{}", params.turn_id),
+                        format!(
+                            "Model safety buffering is active for {}. {}",
+                            params.model,
+                            params.reasons.join("; ")
+                        ),
+                        cx,
+                    );
+                } else {
+                    self.remove_targeted_notice(
+                        &params.thread_id,
+                        &format!("model-safety-{}", params.turn_id),
+                        cx,
+                    );
+                }
+            }
+            ServerNotification::ItemGuardianApprovalReviewStarted(params) => {
+                if let Some(item_id) = params.target_item_id {
+                    self.update_chat(&params.thread_id, cx, |chat| {
+                        chat.append_tool_progress(
+                            &item_id,
+                            "Automatic approval review started".into(),
+                        )
+                    });
+                } else {
+                    self.apply_targeted_notice(
+                        Some(&params.thread_id),
+                        &format!("guardian-review-{}", params.review_id),
+                        format!("Automatic approval review started: {:?}", params.action),
+                        cx,
+                    );
+                }
+            }
+            ServerNotification::ItemGuardianApprovalReviewCompleted(params) => {
+                let mut message = format!(
+                    "Automatic approval review completed: {:?}",
+                    params.review.status
+                );
+                if let Some(risk) = params.review.risk_level {
+                    message.push_str(&format!(" (risk: {risk:?})"));
+                }
+                if let Some(rationale) = params.review.rationale {
+                    message.push_str(&format!(" — {rationale}"));
+                }
+                if let Some(item_id) = params.target_item_id {
+                    self.update_chat(&params.thread_id, cx, |chat| {
+                        chat.append_tool_progress(&item_id, message)
+                    });
+                } else {
+                    self.apply_targeted_notice(
+                        Some(&params.thread_id),
+                        &format!("guardian-review-{}", params.review_id),
+                        message,
+                        cx,
+                    );
+                }
+            }
+            ServerNotification::HookStarted(params) => {
+                self.apply_targeted_notice(
+                    Some(&params.thread_id),
+                    &format!("hook-{}", params.run.id),
+                    format!("Hook started: {:?}", params.run.event_name),
+                    cx,
+                );
+            }
+            ServerNotification::HookCompleted(params) => {
+                self.apply_targeted_notice(
+                    Some(&params.thread_id),
+                    &format!("hook-{}", params.run.id),
+                    format!(
+                        "Hook completed: {:?} — {:?}",
+                        params.run.event_name, params.run.status
+                    ),
+                    cx,
+                );
+            }
+            ServerNotification::ThreadArchived(params) => {
+                self.remove_thread_from_ui(&params.thread_id, cx);
+            }
+            ServerNotification::ThreadClosed(params) => {
+                self.finish_thread_turn(&params.thread_id, None, cx);
+            }
+            ServerNotification::ServerRequestResolved(params) => {
+                self.remove_pending_approval(&params.thread_id, &params.request_id, cx);
+                self.remove_pending_input(&params.thread_id, &params.request_id, cx);
+            }
+            ServerNotification::McpServerOauthLoginCompleted(params) => {
+                let body = if params.success {
+                    format!("Signed in to MCP server {}.", params.name)
+                } else {
+                    format!(
+                        "MCP server {} sign-in failed: {}",
+                        params.name,
+                        params.error.unwrap_or_else(|| "unknown error".into())
+                    )
+                };
+                self.apply_targeted_notice(
+                    params.thread_id.as_deref(),
+                    &format!("mcp-oauth-{}", params.name),
+                    body,
+                    cx,
+                );
+            }
+            ServerNotification::McpServerStatusUpdated(params) => {
+                if params.error.is_some() || params.failure_reason.is_some() {
+                    self.apply_targeted_notice(
+                        params.thread_id.as_deref(),
+                        &format!("mcp-status-{}", params.name),
+                        format!(
+                            "MCP server {}: {:?}. {}",
+                            params.name,
+                            params.status,
+                            params.error.unwrap_or_default()
+                        ),
+                        cx,
+                    );
+                }
+            }
+            ServerNotification::WindowsWorldWritableWarning(params) => {
+                let mut body = format!(
+                    "Windows sandbox warning: world-writable paths detected: {}",
+                    params.sample_paths.join(", ")
+                );
+                if params.extra_count > 0 {
+                    body.push_str(&format!(" and {} more", params.extra_count));
+                }
+                if params.failed_scan {
+                    body.push_str(". The scan did not complete.");
+                }
+                self.apply_targeted_notice(None, "windows-sandbox-warning", body, cx);
+            }
+
+            // These notifications support features that this client does not expose yet, or are
+            // internal bookkeeping with no user-visible transcript representation.
+            ServerNotification::ThreadUnarchived(_)
+            | ServerNotification::SkillsChanged(_)
+            | ServerNotification::ThreadGoalUpdated(_)
+            | ServerNotification::ThreadGoalCleared(_)
+            | ServerNotification::EnvironmentConnected(_)
+            | ServerNotification::EnvironmentDisconnected(_)
+            | ServerNotification::ThreadSettingsUpdated(_)
+            | ServerNotification::ThreadTokenUsageUpdated(_)
+            | ServerNotification::TurnDiffUpdated(_)
+            | ServerNotification::RawResponseItemCompleted(_)
+            | ServerNotification::RawResponseCompleted(_)
+            | ServerNotification::CommandExecOutputDelta(_)
+            | ServerNotification::ProcessOutputDelta(_)
+            | ServerNotification::ProcessExited(_)
+            | ServerNotification::AccountUpdated(_)
+            | ServerNotification::AccountRateLimitsUpdated(_)
+            | ServerNotification::AppListUpdated(_)
+            | ServerNotification::RemoteControlStatusChanged(_)
+            | ServerNotification::ExternalAgentConfigImportProgress(_)
+            | ServerNotification::ExternalAgentConfigImportCompleted(_)
+            | ServerNotification::FsChanged(_)
+            | ServerNotification::ContextCompacted(_)
+            | ServerNotification::TurnModerationMetadata(_)
+            | ServerNotification::FuzzyFileSearchSessionUpdated(_)
+            | ServerNotification::FuzzyFileSearchSessionCompleted(_)
+            | ServerNotification::ThreadRealtimeStarted(_)
+            | ServerNotification::ThreadRealtimeItemAdded(_)
+            | ServerNotification::ThreadRealtimeTranscriptDelta(_)
+            | ServerNotification::ThreadRealtimeTranscriptDone(_)
+            | ServerNotification::ThreadRealtimeOutputAudioDelta(_)
+            | ServerNotification::ThreadRealtimeSdp(_)
+            | ServerNotification::ThreadRealtimeError(_)
+            | ServerNotification::ThreadRealtimeClosed(_)
+            | ServerNotification::WindowsSandboxSetupCompleted(_)
+            | ServerNotification::AccountLoginCompleted(_) => {}
         }
+    }
+
+    pub(super) fn update_chat(
+        &self,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut ChatState),
+    ) {
+        let Some(chat) = self.find_chat_entity(thread_id, cx) else {
+            tracing::warn!(thread_id, "notification targeted an unloaded thread");
+            return;
+        };
+        chat.update(cx, |chat, cx| {
+            update(chat);
+            cx.notify();
+        });
+    }
+
+    fn apply_targeted_notice(
+        &self,
+        thread_id: Option<&str>,
+        notice_id: &str,
+        body: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(thread_id) = thread_id {
+            self.append_notice(thread_id, format!("{notice_id}-{thread_id}"), body, cx);
+        } else if let Some(chat) = self.active_chat_entity(cx) {
+            let thread_id = chat.read(cx).id.clone();
+            self.append_notice(&thread_id, notice_id.to_string(), body, cx);
+        } else {
+            tracing::warn!(notice_id, %body, "notification had no chat to display in");
+        }
+    }
+
+    fn remove_targeted_notice(&self, thread_id: &str, notice_id: &str, cx: &mut Context<Self>) {
+        let id = format!("{notice_id}-{thread_id}");
+        self.update_chat(thread_id, cx, |chat| chat.remove_notice(&id));
+    }
+
+    pub(super) fn apply_thread_error(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        message: String,
+        will_retry: bool,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::error!(thread_id, turn_id, will_retry, error = %message, "turn error");
+        if !will_retry {
+            self.finish_thread_turn(thread_id, Some(turn_id), cx);
+        }
+        let body = if will_retry {
+            format!("{message}\n\nCodex will retry automatically.")
+        } else {
+            message
+        };
+        self.append_notice(thread_id, format!("turn-error-{turn_id}"), body, cx);
+    }
+
+    fn finish_thread_turn(&self, thread_id: &str, turn_id: Option<&str>, cx: &mut Context<Self>) {
+        self.ui_state.update(cx, |state, cx| {
+            let matches = state.active_turn.as_ref().is_some_and(|active| {
+                active.thread_id == thread_id
+                    && turn_id.is_none_or(|turn_id| active.turn_id == turn_id)
+            });
+            if matches {
+                state.clear_active_turn();
+                cx.notify();
+            }
+        });
+    }
+
+    pub(super) fn remove_pending_approval(
+        &self,
+        thread_id: &str,
+        request_id: &codex_app_server_protocol::RequestId,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_chat(thread_id, cx, |chat| chat.remove_approval(request_id));
+    }
+
+    pub(super) fn remove_pending_input(
+        &self,
+        thread_id: &str,
+        request_id: &codex_app_server_protocol::RequestId,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_chat(thread_id, cx, |chat| chat.remove_input_request(request_id));
     }
 
     pub(super) fn apply_thread_started(&mut self, thread: Thread, cx: &mut Context<Self>) {
@@ -348,7 +725,7 @@ impl CodexGui {
         });
         if let Some(chat) = self.active_chat_entity(cx) {
             let thread_id = chat.read(cx).id.clone();
-            self.append_notice(&thread_id, message, cx);
+            self.append_notice(&thread_id, format!("bridge-error-{thread_id}"), message, cx);
         } else if let Some(project) = self.active_project_entity(cx) {
             let chat = cx.new(|_| {
                 ChatState::new(
@@ -437,12 +814,18 @@ impl CodexGui {
         None
     }
 
-    fn append_notice(&self, thread_id: &str, body: String, cx: &mut Context<Self>) {
+    fn append_notice(
+        &self,
+        thread_id: &str,
+        notice_id: String,
+        body: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
         chat.update(cx, |chat, cx| {
-            chat.upsert_notice(format!("notice-{thread_id}"), body);
+            chat.upsert_notice(notice_id, body);
             cx.notify();
         });
     }
@@ -503,12 +886,18 @@ impl CodexGui {
         });
     }
 
-    fn complete_thread_item(&self, thread_id: &str, item: ThreadItem, cx: &mut Context<Self>) {
+    fn complete_thread_item(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        item: ThreadItem,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat) = self.find_chat_entity(thread_id, cx) else {
             return;
         };
         chat.update(cx, |chat, cx| {
-            chat.complete_item(item);
+            chat.complete_item(turn_id, item);
             cx.notify();
         });
     }

@@ -4,6 +4,7 @@ mod actions;
 mod effects;
 mod event_handler;
 mod results;
+mod server_requests;
 mod thread_mapping;
 
 use gpui::{

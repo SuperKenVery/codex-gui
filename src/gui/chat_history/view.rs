@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use codex_app_server_protocol::RequestId;
 use gpui::{
     Bounds, Context, Entity, EventEmitter, FollowMode, IntoElement, ParentElement, Pixels, Render,
     Styled, Subscription, Window, div, prelude::*, px,
@@ -47,6 +48,22 @@ pub(crate) enum ChatHistoryEvent {
     },
     ForkUserMessage {
         turn_id: String,
+    },
+    ResolveApproval {
+        request_id: RequestId,
+        approved: bool,
+    },
+    AnswerInput {
+        request_id: RequestId,
+        question_id: String,
+        answer: String,
+    },
+    RejectInput {
+        request_id: RequestId,
+    },
+    DismissNotice {
+        chat_id: String,
+        notice_id: String,
     },
 }
 
@@ -195,6 +212,47 @@ impl ChatHistory {
 
     pub(super) fn fork_user_message(&mut self, turn_id: String, cx: &mut Context<Self>) {
         cx.emit(ChatHistoryEvent::ForkUserMessage { turn_id });
+    }
+
+    pub(super) fn resolve_approval(
+        &mut self,
+        request_id: RequestId,
+        approved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(ChatHistoryEvent::ResolveApproval {
+            request_id,
+            approved,
+        });
+    }
+
+    pub(super) fn answer_input(
+        &mut self,
+        request_id: RequestId,
+        question_id: String,
+        answer: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(ChatHistoryEvent::AnswerInput {
+            request_id,
+            question_id,
+            answer,
+        });
+    }
+
+    pub(super) fn reject_input(&mut self, request_id: RequestId, cx: &mut Context<Self>) {
+        cx.emit(ChatHistoryEvent::RejectInput { request_id });
+    }
+
+    pub(super) fn dismiss_notice(&mut self, notice_id: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self
+            .active_chat
+            .as_ref()
+            .map(|chat| chat.read(cx).id.clone())
+        else {
+            return;
+        };
+        cx.emit(ChatHistoryEvent::DismissNotice { chat_id, notice_id });
     }
 
     fn rebuild_transcript(&mut self, cx: &mut Context<Self>) {

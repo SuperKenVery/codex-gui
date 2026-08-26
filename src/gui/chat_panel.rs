@@ -59,7 +59,14 @@ impl ChatPanel {
             cx.observe(&ui_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&composer_input, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    if view.active_chat_turn_running(cx) && view.editing_message.is_none() {
+                    let answering_input = view
+                        .state
+                        .read(cx)
+                        .active_chat_entity(cx)
+                        .is_some_and(|chat| chat.read(cx).pending_freeform_input().is_some());
+                    if answering_input {
+                        view.send_composer_turn(window, cx);
+                    } else if view.active_chat_turn_running(cx) && view.editing_message.is_none() {
                         view.steer_composer_turn(window, cx);
                     } else {
                         view.send_composer_turn(window, cx);
@@ -80,6 +87,52 @@ impl ChatPanel {
                 ),
                 ChatHistoryEvent::ForkUserMessage { turn_id } => {
                     view.fork_chat_through(turn_id.clone(), cx)
+                }
+                ChatHistoryEvent::ResolveApproval {
+                    request_id,
+                    approved,
+                } => {
+                    let parent = view.parent.clone();
+                    let request_id = request_id.clone();
+                    let approved = *approved;
+                    cx.defer(move |cx| {
+                        let _ = parent.update(cx, |parent, cx| {
+                            parent.resolve_approval(request_id, approved, cx)
+                        });
+                    });
+                }
+                ChatHistoryEvent::AnswerInput {
+                    request_id,
+                    question_id,
+                    answer,
+                } => {
+                    let parent = view.parent.clone();
+                    let request_id = request_id.clone();
+                    let question_id = question_id.clone();
+                    let answer = answer.clone();
+                    cx.defer(move |cx| {
+                        let _ = parent.update(cx, |parent, cx| {
+                            parent.answer_server_input(request_id, question_id, answer, cx)
+                        });
+                    });
+                }
+                ChatHistoryEvent::RejectInput { request_id } => {
+                    let parent = view.parent.clone();
+                    let request_id = request_id.clone();
+                    cx.defer(move |cx| {
+                        let _ = parent
+                            .update(cx, |parent, cx| parent.reject_server_input(request_id, cx));
+                    });
+                }
+                ChatHistoryEvent::DismissNotice { chat_id, notice_id } => {
+                    let parent = view.parent.clone();
+                    let chat_id = chat_id.clone();
+                    let notice_id = notice_id.clone();
+                    cx.defer(move |cx| {
+                        let _ = parent.update(cx, |parent, cx| {
+                            parent.dismiss_notice(chat_id, notice_id, cx)
+                        });
+                    });
                 }
             }),
             cx.subscribe_in(&project_path_input, window, |view, _, event, window, cx| {
@@ -115,6 +168,20 @@ impl ChatPanel {
             (text, source_bounds)
         });
         if text.is_empty() {
+            return;
+        }
+        let pending_input = self
+            .state
+            .read(cx)
+            .active_chat_entity(cx)
+            .and_then(|chat| chat.read(cx).pending_freeform_input());
+        if let Some((request_id, question_id)) = pending_input {
+            let parent = self.parent.clone();
+            cx.defer(move |cx| {
+                let _ = parent.update(cx, |parent, cx| {
+                    parent.answer_server_input(request_id, question_id, text, cx)
+                });
+            });
             return;
         }
         let editing_message = self.editing_message.take();
@@ -299,6 +366,12 @@ impl ChatPanel {
                 ]
             });
         let turn_running = self.active_chat_turn_running(cx);
+        let answering_input = self
+            .state
+            .read(cx)
+            .active_chat_entity(cx)
+            .is_some_and(|chat| chat.read(cx).pending_freeform_input().is_some());
+        let can_stop = turn_running && !answering_input;
         let user_message_sending = self.user_message_sending(cx);
 
         div()
@@ -483,7 +556,7 @@ impl ChatPanel {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .when(turn_running, |actions| {
+                            .when(can_stop, |actions| {
                                 actions.child(
                                     Button::new("steer-composer-turn")
                                         .small()
@@ -500,18 +573,24 @@ impl ChatPanel {
                             .child(
                                 Button::new("send-or-stop-composer-turn")
                                     .small()
-                                    .loading(!turn_running && user_message_sending)
-                                    .when(!turn_running, |button| button.primary())
-                                    .when(turn_running, |button| button.danger())
+                                    .loading(!can_stop && user_message_sending)
+                                    .when(!can_stop, |button| button.primary())
+                                    .when(can_stop, |button| button.danger())
                                     .rounded(px(999.))
-                                    .icon(if turn_running {
+                                    .icon(if can_stop {
                                         IconName::Close
                                     } else {
                                         IconName::ArrowUp
                                     })
-                                    .tooltip(if turn_running { "Stop" } else { "Send" })
+                                    .tooltip(if can_stop { "Stop" } else { "Send" })
                                     .on_click(cx.listener(|view, _, window, cx| {
-                                        if view.active_chat_turn_running(cx) {
+                                        let answering_input =
+                                            view.state.read(cx).active_chat_entity(cx).is_some_and(
+                                                |chat| {
+                                                    chat.read(cx).pending_freeform_input().is_some()
+                                                },
+                                            );
+                                        if view.active_chat_turn_running(cx) && !answering_input {
                                             view.stop_active_turn(cx);
                                         } else {
                                             view.send_composer_turn(window, cx);

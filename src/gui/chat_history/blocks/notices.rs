@@ -1,20 +1,15 @@
-use gpui::{IntoElement, ParentElement, SharedString, Styled, div, px};
-use gpui_component::theme::Theme;
+use gpui::{App, IntoElement, ParentElement, SharedString, Styled, div};
+use gpui_component::alert::Alert;
 
-pub(super) fn render(body: SharedString, theme: &Theme) -> impl IntoElement {
+pub(super) fn render(
+    key: &str,
+    body: SharedString,
+    on_dismiss: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
     div().w_full().min_w_0().overflow_x_hidden().py_2().child(
-        div()
-            .w_full()
-            .min_w_0()
-            .overflow_x_hidden()
-            .rounded_lg()
-            .bg(theme.danger_foreground)
-            .px_4()
-            .py_3()
-            .text_base()
-            .line_height(px(25.))
-            // .text_color(theme.danger_foreground)
-            .whitespace_normal()
-            .child(body),
+        Alert::warning(key.to_string(), body).on_close(move |_, _, cx| {
+            cx.stop_propagation();
+            on_dismiss(cx);
+        }),
     )
 }

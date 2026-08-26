@@ -8,9 +8,19 @@ use crate::{
     gui::{ApprovalReviewerMode, ChatState, ProjectState, single_line_title},
     workspace::workspace_path,
 };
+use codex_app_server_protocol::RequestId;
 use gpui::{AppContext, Context};
 
 impl CodexGui {
+    pub(crate) fn dismiss_notice(
+        &mut self,
+        chat_id: String,
+        notice_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_chat(&chat_id, cx, |chat| chat.remove_notice(&notice_id));
+    }
+
     pub(crate) fn select_project(&mut self, index: usize, cx: &mut Context<Self>) {
         self.state.update(cx, |state, cx| {
             state.select_project(index);
@@ -483,6 +493,127 @@ impl CodexGui {
             cx.notify();
         });
         cx.notify();
+    }
+
+    pub(crate) fn resolve_approval(
+        &mut self,
+        request_id: RequestId,
+        approved: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.active_chat_entity(cx) else {
+            return;
+        };
+        let thread_id = chat.read(cx).id.clone();
+        let response = chat
+            .read(cx)
+            .pending_approvals
+            .iter()
+            .find(|approval| approval.request_id == request_id)
+            .map(|approval| approval.response(approved));
+        let Some(response) = response else {
+            return;
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                self.apply_bridge_error(format!("failed to encode approval response: {error}"), cx);
+                return;
+            }
+        };
+
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge
+                .resolve_server_request(request_id.clone(), response)
+                .await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => view.remove_pending_approval(&thread_id, &request_id, cx),
+                Err(error) => view.apply_thread_error(
+                    &thread_id,
+                    "approval",
+                    format!("failed to resolve approval: {error}"),
+                    false,
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn answer_server_input(
+        &mut self,
+        request_id: RequestId,
+        question_id: String,
+        answer: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.active_chat_entity(cx) else {
+            return;
+        };
+        let thread_id = chat.read(cx).id.clone();
+        let response = chat.update(cx, |chat, cx| {
+            let response = chat.answer_input_request(&request_id, question_id, answer);
+            cx.notify();
+            response
+        });
+        let Some(response) = response else {
+            return;
+        };
+        let response = match serde_json::to_value(response) {
+            Ok(response) => response,
+            Err(error) => {
+                self.apply_thread_error(
+                    &thread_id,
+                    "user-input",
+                    format!("failed to encode input response: {error}"),
+                    false,
+                    cx,
+                );
+                return;
+            }
+        };
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge
+                .resolve_server_request(request_id.clone(), response)
+                .await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => view.remove_pending_input(&thread_id, &request_id, cx),
+                Err(error) => view.apply_thread_error(
+                    &thread_id,
+                    "user-input",
+                    format!("failed to answer input request: {error}"),
+                    false,
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn reject_server_input(&mut self, request_id: RequestId, cx: &mut Context<Self>) {
+        let Some(chat) = self.active_chat_entity(cx) else {
+            return;
+        };
+        let thread_id = chat.read(cx).id.clone();
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge
+                .reject_server_request(request_id.clone(), "user declined input request".into())
+                .await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => view.remove_pending_input(&thread_id, &request_id, cx),
+                Err(error) => view.apply_thread_error(
+                    &thread_id,
+                    "user-input",
+                    format!("failed to reject input request: {error}"),
+                    false,
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     fn sync_active_thread_settings(&mut self, cx: &mut Context<Self>) {

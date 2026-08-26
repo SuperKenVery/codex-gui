@@ -1,5 +1,11 @@
+mod activity;
+mod approval;
+mod context;
+mod input_request;
 mod messages;
 mod notices;
+mod plan;
+mod reasoning;
 mod tools;
 mod worked_summary;
 
@@ -16,7 +22,8 @@ use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
 use gpui_component::ActiveTheme as _;
 
 use super::view::ChatHistory;
-pub(super) use tools::{ToolCallView, is_tool_item, tool_call_views, tools_done};
+use crate::gui::{PendingApproval, PendingUserInputRequest};
+pub(super) use tools::{ToolCall, is_tool_item, tool_calls, tools_done};
 
 #[derive(Clone)]
 pub(super) enum UserMessageDelivery {
@@ -68,9 +75,35 @@ pub(super) enum HistoryBlock {
         key: String,
         body: SharedString,
     },
+    Activity {
+        key: String,
+        title: SharedString,
+        body: SharedString,
+        running: bool,
+    },
+    Plan {
+        key: String,
+        body: SharedString,
+        running: bool,
+    },
+    Reasoning {
+        key: String,
+        body: SharedString,
+        running: bool,
+    },
+    HookPrompt {
+        key: String,
+        body: SharedString,
+    },
+    Approval {
+        approval: PendingApproval,
+    },
+    InputRequest {
+        request: PendingUserInputRequest,
+    },
     ToolGroup {
         key: String,
-        tools: Arc<[ToolCallView]>,
+        tools: Arc<[ToolCall]>,
         expanded: bool,
         collapsible: bool,
         active_tail: bool,
@@ -88,6 +121,16 @@ impl HistoryBlock {
             Self::User { key, .. } => BlockId::new("user", key),
             Self::AssistantHeader { key, .. } => BlockId::new("assistant-header", key),
             Self::Notice { key, .. } => BlockId::new("notice", key),
+            Self::Activity { key, .. } => BlockId::new("activity", key),
+            Self::Plan { key, .. } => BlockId::new("plan", key),
+            Self::Reasoning { key, .. } => BlockId::new("reasoning", key),
+            Self::HookPrompt { key, .. } => BlockId::new("hook-prompt", key),
+            Self::Approval { approval } => {
+                BlockId::new("approval", &approval.request_id.to_string())
+            }
+            Self::InputRequest { request } => {
+                BlockId::new("input-request", &request.request_id.to_string())
+            }
             Self::ToolGroup { key, .. } => BlockId::tool_group(key),
             Self::WorkedSummary { turn_id, .. } => BlockId::new("worked-summary", turn_id),
         }
@@ -153,7 +196,79 @@ pub(super) fn render(
         HistoryBlock::AssistantHeader { label, .. } => {
             messages::render_assistant_header(label, cx.theme()).into_any_element()
         }
-        HistoryBlock::Notice { body, .. } => notices::render(body, cx.theme()).into_any_element(),
+        HistoryBlock::Notice { key, body } => {
+            let dismiss_history = history.clone();
+            let notice_id = key.clone();
+            notices::render(&key, body, move |cx| {
+                let notice_id = notice_id.clone();
+                let _ =
+                    dismiss_history.update(cx, |history, cx| history.dismiss_notice(notice_id, cx));
+            })
+            .into_any_element()
+        }
+        HistoryBlock::Activity {
+            title,
+            body,
+            running,
+            ..
+        } => activity::render(title, body, running, cx.theme()).into_any_element(),
+        HistoryBlock::Plan { body, running, .. } => {
+            plan::render(body, running, cx.theme()).into_any_element()
+        }
+        HistoryBlock::Reasoning { body, running, .. } => {
+            reasoning::render(body, running, cx.theme()).into_any_element()
+        }
+        HistoryBlock::HookPrompt { body, .. } => {
+            context::render_hook_prompt(body, cx.theme()).into_any_element()
+        }
+        HistoryBlock::Approval { approval } => {
+            let key = approval.request_id.to_string();
+            let allow_history = history.clone();
+            let allow_request_id = approval.request_id.clone();
+            let reject_history = history.clone();
+            let reject_request_id = approval.request_id.clone();
+            approval::render(
+                &key,
+                approval.title,
+                approval.body,
+                cx.theme(),
+                move |cx| {
+                    let request_id = allow_request_id.clone();
+                    let _ = allow_history.update(cx, |history, cx| {
+                        history.resolve_approval(request_id, true, cx)
+                    });
+                },
+                move |cx| {
+                    let request_id = reject_request_id.clone();
+                    let _ = reject_history.update(cx, |history, cx| {
+                        history.resolve_approval(request_id, false, cx)
+                    });
+                },
+            )
+            .into_any_element()
+        }
+        HistoryBlock::InputRequest { request } => {
+            let answer_history = history.clone();
+            let answer_request_id = request.request_id.clone();
+            let reject_history = history.clone();
+            let reject_request_id = request.request_id.clone();
+            input_request::render(
+                request,
+                cx.theme(),
+                Arc::new(move |question_id, answer, cx| {
+                    let request_id = answer_request_id.clone();
+                    let _ = answer_history.update(cx, |history, cx| {
+                        history.answer_input(request_id, question_id, answer, cx)
+                    });
+                }),
+                move |cx| {
+                    let request_id = reject_request_id.clone();
+                    let _ = reject_history
+                        .update(cx, |history, cx| history.reject_input(request_id, cx));
+                },
+            )
+            .into_any_element()
+        }
         HistoryBlock::ToolGroup {
             key,
             tools,
@@ -162,14 +277,16 @@ pub(super) fn render(
             active_tail,
         } => {
             let history = history.clone();
+            let toggle_key = key.clone();
             tools::render_group(
+                &key,
                 &tools,
                 collapsible,
                 active_tail,
                 expanded,
                 cx.theme(),
                 move |cx| {
-                    let key = key.clone();
+                    let key = toggle_key.clone();
                     let _ = history.update(cx, |history, cx| history.toggle_tools(&key, cx));
                 },
             )

@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 
 use codex_app_server_protocol::{
-    FileUpdateChange, Thread, ThreadItem, ThreadStatus, Turn, TurnStatus, UserInput,
+    CommandExecutionApprovalDecision, CommandExecutionRequestApprovalResponse,
+    FileChangeApprovalDecision, FileChangeRequestApprovalResponse, FileUpdateChange,
+    GrantedPermissionProfile, McpServerElicitationAction, McpServerElicitationRequestResponse,
+    PermissionGrantScope, PermissionsRequestApprovalResponse, RequestId, Thread, ThreadItem,
+    ThreadStatus, ToolRequestUserInputAnswer, ToolRequestUserInputQuestion,
+    ToolRequestUserInputResponse, Turn, TurnPlanStep, TurnStatus, UserInput,
 };
 use gpui::{AppContext, Context, Entity, SharedString};
 use uuid::Uuid;
@@ -343,6 +348,10 @@ pub struct ChatState {
     pub subtitle: SharedString,
     pub thread: Option<Thread>,
     pub notices: Vec<HistoryNotice>,
+    pub pending_approvals: Vec<PendingApproval>,
+    pub pending_inputs: Vec<PendingUserInputRequest>,
+    pub turn_plans: HashMap<String, TurnPlanView>,
+    pub tool_progress: HashMap<String, Vec<SharedString>>,
     pending_user_message: Option<PendingUserMessage>,
     message_states: HashMap<String, MessageState>,
     item_locations: HashMap<String, ThreadItemLocation>,
@@ -361,6 +370,10 @@ impl ChatState {
             subtitle,
             thread: None,
             notices,
+            pending_approvals: Vec::new(),
+            pending_inputs: Vec::new(),
+            turn_plans: HashMap::new(),
+            tool_progress: HashMap::new(),
             pending_user_message: None,
             message_states: HashMap::new(),
             item_locations: HashMap::new(),
@@ -376,6 +389,10 @@ impl ChatState {
             subtitle,
             thread: Some(thread),
             notices: Vec::new(),
+            pending_approvals: Vec::new(),
+            pending_inputs: Vec::new(),
+            turn_plans: HashMap::new(),
+            tool_progress: HashMap::new(),
             pending_user_message: None,
             message_states: HashMap::new(),
             item_locations,
@@ -390,6 +407,111 @@ impl ChatState {
                 id,
                 body: body.into(),
             });
+        }
+    }
+
+    pub fn remove_notice(&mut self, id: &str) {
+        self.notices.retain(|notice| notice.id != id);
+    }
+
+    pub fn upsert_approval(&mut self, approval: PendingApproval) {
+        if let Some(existing) = self
+            .pending_approvals
+            .iter_mut()
+            .find(|existing| existing.request_id == approval.request_id)
+        {
+            *existing = approval;
+        } else {
+            self.pending_approvals.push(approval);
+        }
+    }
+
+    pub fn remove_approval(&mut self, request_id: &RequestId) {
+        self.pending_approvals
+            .retain(|approval| &approval.request_id != request_id);
+    }
+
+    pub fn upsert_input_request(&mut self, request: PendingUserInputRequest) {
+        if let Some(existing) = self
+            .pending_inputs
+            .iter_mut()
+            .find(|existing| existing.request_id == request.request_id)
+        {
+            *existing = request;
+        } else {
+            self.pending_inputs.push(request);
+        }
+    }
+
+    pub fn answer_input_request(
+        &mut self,
+        request_id: &RequestId,
+        question_id: String,
+        answer: String,
+    ) -> Option<ToolRequestUserInputResponse> {
+        let request = self
+            .pending_inputs
+            .iter_mut()
+            .find(|request| &request.request_id == request_id)?;
+        request.answers.insert(question_id, vec![answer]);
+        if request
+            .questions
+            .iter()
+            .all(|question| request.answers.contains_key(&question.id))
+        {
+            Some(ToolRequestUserInputResponse {
+                answers: request
+                    .answers
+                    .iter()
+                    .map(|(id, answers)| {
+                        (
+                            id.clone(),
+                            ToolRequestUserInputAnswer {
+                                answers: answers.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn remove_input_request(&mut self, request_id: &RequestId) {
+        self.pending_inputs
+            .retain(|request| &request.request_id != request_id);
+    }
+
+    pub fn pending_freeform_input(&self) -> Option<(RequestId, String)> {
+        self.pending_inputs.iter().find_map(|request| {
+            request.questions.iter().find_map(|question| {
+                (!request.answers.contains_key(&question.id)
+                    && question.options.as_ref().is_none_or(Vec::is_empty))
+                .then(|| (request.request_id.clone(), question.id.clone()))
+            })
+        })
+    }
+
+    pub fn update_turn_plan(
+        &mut self,
+        turn_id: String,
+        explanation: Option<String>,
+        plan: Vec<TurnPlanStep>,
+    ) {
+        self.turn_plans.insert(
+            turn_id,
+            TurnPlanView {
+                explanation: explanation.map(Into::into),
+                steps: plan,
+            },
+        );
+    }
+
+    pub fn append_tool_progress(&mut self, item_id: &str, message: String) {
+        let messages = self.tool_progress.entry(item_id.to_string()).or_default();
+        if messages.last().is_none_or(|last| last.as_ref() != message) {
+            messages.push(message.into());
         }
     }
 
@@ -530,10 +652,10 @@ impl ChatState {
         self.upsert_thread_item(turn_id, item);
     }
 
-    pub fn complete_item(&mut self, item: ThreadItem) {
+    pub fn complete_item(&mut self, turn_id: &str, item: ThreadItem) {
         self.acknowledge_user_message_in(std::slice::from_ref(&item));
         let item_id = item.id().to_string();
-        self.replace_thread_item(item);
+        self.upsert_thread_item(turn_id, item);
         if let Some(state) = self.message_states.get_mut(&item_id) {
             state.lifecycle = MessageLifecycle::Complete;
         }
@@ -575,29 +697,60 @@ impl ChatState {
         }
     }
 
-    pub fn replace_thread_item(&mut self, item: ThreadItem) {
-        let Some(thread) = &mut self.thread else {
-            return;
-        };
-        let item_id = item.id().to_string();
-        for turn in &mut thread.turns {
-            if let Some(existing) = turn
-                .items
-                .iter_mut()
-                .find(|existing| existing.id() == item_id)
-            {
-                *existing = item;
-                self.rebuild_item_locations();
-                return;
-            }
-        }
-    }
-
     pub fn append_agent_text_delta(&mut self, item_id: &str, delta: &str) {
         let Some(ThreadItem::AgentMessage { text, .. }) = self.thread_item_mut(item_id) else {
             return;
         };
         text.push_str(delta);
+    }
+
+    pub fn append_plan_delta(&mut self, item_id: &str, delta: &str) {
+        let Some(ThreadItem::Plan { text, .. }) = self.thread_item_mut(item_id) else {
+            return;
+        };
+        text.push_str(delta);
+    }
+
+    pub fn append_reasoning_summary_delta(
+        &mut self,
+        item_id: &str,
+        summary_index: i64,
+        delta: &str,
+    ) {
+        let Ok(summary_index) = usize::try_from(summary_index) else {
+            return;
+        };
+        let Some(ThreadItem::Reasoning { summary, .. }) = self.thread_item_mut(item_id) else {
+            return;
+        };
+        summary.resize_with(summary_index + 1, String::new);
+        summary[summary_index].push_str(delta);
+    }
+
+    pub fn add_reasoning_summary_part(&mut self, item_id: &str, summary_index: i64) {
+        let Ok(summary_index) = usize::try_from(summary_index) else {
+            return;
+        };
+        let Some(ThreadItem::Reasoning { summary, .. }) = self.thread_item_mut(item_id) else {
+            return;
+        };
+        summary.resize_with(summary_index + 1, String::new);
+    }
+
+    pub fn append_reasoning_content_delta(
+        &mut self,
+        item_id: &str,
+        content_index: i64,
+        delta: &str,
+    ) {
+        let Ok(content_index) = usize::try_from(content_index) else {
+            return;
+        };
+        let Some(ThreadItem::Reasoning { content, .. }) = self.thread_item_mut(item_id) else {
+            return;
+        };
+        content.resize_with(content_index + 1, String::new);
+        content[content_index].push_str(delta);
     }
 
     pub fn append_command_output_delta(&mut self, item_id: &str, delta: &str) {
@@ -723,6 +876,84 @@ pub enum PendingUserMessageDelivery {
 pub struct HistoryNotice {
     pub id: String,
     pub body: SharedString,
+}
+
+#[derive(Clone)]
+pub struct TurnPlanView {
+    pub explanation: Option<SharedString>,
+    pub steps: Vec<TurnPlanStep>,
+}
+
+#[derive(Clone)]
+pub struct PendingApproval {
+    pub request_id: RequestId,
+    pub title: SharedString,
+    pub body: SharedString,
+    pub kind: PendingApprovalKind,
+}
+
+#[derive(Clone)]
+pub struct PendingUserInputRequest {
+    pub request_id: RequestId,
+    pub questions: Vec<ToolRequestUserInputQuestion>,
+    pub answers: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone)]
+pub enum PendingApprovalKind {
+    Command,
+    FileChange,
+    Permissions {
+        permissions: GrantedPermissionProfile,
+    },
+    McpElicitation {
+        accept_content: Option<serde_json::Value>,
+        meta: Option<serde_json::Value>,
+    },
+}
+
+impl PendingApproval {
+    pub fn response(&self, approved: bool) -> serde_json::Result<serde_json::Value> {
+        match &self.kind {
+            PendingApprovalKind::Command => {
+                serde_json::to_value(CommandExecutionRequestApprovalResponse {
+                    decision: if approved {
+                        CommandExecutionApprovalDecision::Accept
+                    } else {
+                        CommandExecutionApprovalDecision::Decline
+                    },
+                })
+            }
+            PendingApprovalKind::FileChange => {
+                serde_json::to_value(FileChangeRequestApprovalResponse {
+                    decision: if approved {
+                        FileChangeApprovalDecision::Accept
+                    } else {
+                        FileChangeApprovalDecision::Decline
+                    },
+                })
+            }
+            PendingApprovalKind::Permissions { permissions } => {
+                serde_json::to_value(PermissionsRequestApprovalResponse {
+                    permissions: approved.then(|| permissions.clone()).unwrap_or_default(),
+                    scope: PermissionGrantScope::Turn,
+                    strict_auto_review: None,
+                })
+            }
+            PendingApprovalKind::McpElicitation {
+                accept_content,
+                meta,
+            } => serde_json::to_value(McpServerElicitationRequestResponse {
+                action: if approved {
+                    McpServerElicitationAction::Accept
+                } else {
+                    McpServerElicitationAction::Decline
+                },
+                content: approved.then(|| accept_content.clone()).flatten(),
+                meta: meta.clone(),
+            }),
+        }
+    }
 }
 
 /// Runtime lifecycle supplied by item notifications but absent from `ThreadItem`.
@@ -853,7 +1084,10 @@ pub struct ActiveTurn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_app_server_protocol::{TurnItemsView, UserInput};
+    use codex_app_server_protocol::{
+        CommandExecutionRequestApprovalResponse, ToolRequestUserInputOption, TurnItemsView,
+        UserInput,
+    };
 
     #[test]
     fn canonical_user_message_acknowledges_matching_pending_message() {
@@ -989,5 +1223,62 @@ mod tests {
         assert_eq!(live_turn.status, TurnStatus::Completed);
         assert_eq!(live_turn.completed_at, Some(12));
         assert_eq!(live_turn.duration_ms, Some(2_000));
+    }
+
+    #[test]
+    fn command_approval_encodes_allow_and_reject_decisions() {
+        let approval = PendingApproval {
+            request_id: RequestId::Integer(7),
+            title: "Allow?".into(),
+            body: "cargo check".into(),
+            kind: PendingApprovalKind::Command,
+        };
+
+        let allow: CommandExecutionRequestApprovalResponse =
+            serde_json::from_value(approval.response(true).unwrap()).unwrap();
+        let reject: CommandExecutionRequestApprovalResponse =
+            serde_json::from_value(approval.response(false).unwrap()).unwrap();
+
+        assert_eq!(allow.decision, CommandExecutionApprovalDecision::Accept);
+        assert_eq!(reject.decision, CommandExecutionApprovalDecision::Decline);
+    }
+
+    #[test]
+    fn input_request_resolves_only_after_every_question_is_answered() {
+        let mut chat = ChatState::new(
+            "thread-1".into(),
+            "Thread".into(),
+            "running".into(),
+            Vec::new(),
+        );
+        let request_id = RequestId::Integer(9);
+        let question = |id: &str| ToolRequestUserInputQuestion {
+            id: id.into(),
+            header: id.into(),
+            question: format!("Choose {id}"),
+            is_other: false,
+            is_secret: false,
+            options: Some(vec![ToolRequestUserInputOption {
+                label: "yes".into(),
+                description: "Continue".into(),
+            }]),
+        };
+        chat.upsert_input_request(PendingUserInputRequest {
+            request_id: request_id.clone(),
+            questions: vec![question("first"), question("second")],
+            answers: HashMap::new(),
+        });
+
+        assert!(
+            chat.answer_input_request(&request_id, "first".into(), "yes".into())
+                .is_none()
+        );
+        let response = chat
+            .answer_input_request(&request_id, "second".into(), "yes".into())
+            .unwrap();
+
+        assert_eq!(response.answers.len(), 2);
+        assert_eq!(response.answers["first"].answers, vec!["yes"]);
+        assert_eq!(response.answers["second"].answers, vec!["yes"]);
     }
 }
