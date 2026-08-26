@@ -1,0 +1,253 @@
+name: Build distributable packages
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ORANC_CACHE_REPOSITORY: codex-gui-nix-cache
+
+jobs:
+  initialize-nix-cache:
+    # Repository branches may publish cache entries. Fork PRs still consume
+    # the public substituter from flake.nix, but never receive signing secrets.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    services:
+      oranc:
+        image: ghcr.io/linyinfeng/oranc:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Initialize GHCR Nix cache
+        uses: linyinfeng/oranc-action@v1
+        with:
+          orancServerContainer: ${{ job.services.oranc.id }}
+          repositoryPart2: ${{ env.ORANC_CACHE_REPOSITORY }}
+          signingKey: ${{ secrets.ORANC_SIGNING_KEY }}
+          initialize: true
+
+  linux:
+    needs: initialize-nix-cache
+    if: >-
+      always() &&
+      (needs.initialize-nix-cache.result == 'success' ||
+       needs.initialize-nix-cache.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            nix-system: x86_64-linux
+            artifact-arch: x86_64
+          - runner: ubuntu-24.04-arm
+            nix-system: aarch64-linux
+            artifact-arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    services:
+      oranc:
+        image: ghcr.io/linyinfeng/oranc:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Use GHCR Nix cache
+        if: needs.initialize-nix-cache.result == 'success'
+        uses: linyinfeng/oranc-action@v1
+        with:
+          orancServerContainer: ${{ job.services.oranc.id }}
+          repositoryPart2: ${{ env.ORANC_CACHE_REPOSITORY }}
+          signingKey: ${{ secrets.ORANC_SIGNING_KEY }}
+      - name: Build package and Linux bundles
+        run: |
+          nix build --accept-flake-config --print-build-logs .#codex-gui --out-link result-package
+          nix build --accept-flake-config --print-build-logs .#deb --out-link result-deb
+          nix build --accept-flake-config --print-build-logs .#rpm --out-link result-rpm
+          nix build --accept-flake-config --print-build-logs .#appimage --out-link result-appimage
+      - name: Collect Linux artifacts
+        env:
+          ARTIFACT_ARCH: ${{ matrix.artifact-arch }}
+        run: |
+          version=$(nix eval --accept-flake-config --raw .#codex-gui.version)
+          mkdir -p dist
+          cp --dereference result-deb/*.deb "dist/codex-gui-${version}-linux-${ARTIFACT_ARCH}.deb"
+          cp --dereference result-rpm/*.rpm "dist/codex-gui-${version}-linux-${ARTIFACT_ARCH}.rpm"
+          cp --dereference result-appimage "dist/codex-gui-${version}-linux-${ARTIFACT_ARCH}.AppImage"
+          chmod +x "dist/codex-gui-${version}-linux-${ARTIFACT_ARCH}.AppImage"
+          file dist/*
+      - name: Verify both executables are packaged
+        run: |
+          test -x result-package/bin/codex-gui
+          test -x result-package/bin/codex-code-mode-host
+          test "$(dirname "$(readlink -f result-package/bin/codex-gui)")" = \
+               "$(dirname "$(readlink -f result-package/bin/codex-code-mode-host)")"
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-gui-linux-${{ matrix.artifact-arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos-arm64:
+    needs: initialize-nix-cache
+    if: >-
+      always() &&
+      (needs.initialize-nix-cache.result == 'success' ||
+       needs.initialize-nix-cache.result == 'skipped')
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build arm64 macOS application
+        run: nix build --accept-flake-config --print-build-logs .#macos-archive --out-link result-macos
+      - name: Collect and verify macOS artifact
+        run: |
+          mkdir -p dist
+          cp result-macos/*.zip dist/
+          rm -rf verify-macos
+          mkdir verify-macos
+          ditto -x -k dist/*.zip verify-macos
+          test -x "verify-macos/Codex GUI.app/Contents/MacOS/codex-gui"
+          test -x "verify-macos/Codex GUI.app/Contents/MacOS/codex-code-mode-host"
+          test -d "verify-macos/Codex GUI.app/Contents/Frameworks"
+          codesign --verify --deep --strict "verify-macos/Codex GUI.app"
+          file "verify-macos/Codex GUI.app/Contents/MacOS/"*
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-gui-macos-aarch64
+          path: dist/*.zip
+          if-no-files-found: error
+      - name: Stage macOS package for GHCR Nix cache
+        if: needs.initialize-nix-cache.result == 'success'
+        run: |
+          nix build --accept-flake-config .#codex-gui --out-link result-package
+          nix copy --to "file://$RUNNER_TEMP/macos-nix-cache" ./result-package
+          readlink result-package > "$RUNNER_TEMP/macos-nix-cache/root-store-path"
+      - name: Upload macOS Nix cache transfer
+        if: needs.initialize-nix-cache.result == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: internal-macos-nix-cache-${{ github.run_id }}
+          path: ${{ runner.temp }}/macos-nix-cache
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-macos-nix-cache:
+    needs:
+      - initialize-nix-cache
+      - macos-arm64
+    if: >-
+      always() &&
+      needs.initialize-nix-cache.result == 'success' &&
+      needs.macos-arm64.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    services:
+      oranc:
+        image: ghcr.io/linyinfeng/oranc:latest
+    steps:
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Use GHCR Nix cache
+        uses: linyinfeng/oranc-action@v1
+        with:
+          orancServerContainer: ${{ job.services.oranc.id }}
+          repositoryPart2: ${{ env.ORANC_CACHE_REPOSITORY }}
+          signingKey: ${{ secrets.ORANC_SIGNING_KEY }}
+      - name: Download macOS Nix cache transfer
+        uses: actions/download-artifact@v8
+        with:
+          name: internal-macos-nix-cache-${{ github.run_id }}
+          path: macos-nix-cache
+      - name: Import macOS package closure
+        run: |
+          root_store_path=$(cat macos-nix-cache/root-store-path)
+          nix copy \
+            --from "file://$GITHUB_WORKSPACE/macos-nix-cache" \
+            --no-check-sigs \
+            "$root_store_path"
+          test -x "$root_store_path/bin/codex-gui"
+          test -x "$root_store_path/bin/codex-code-mode-host"
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            artifact-arch: x86_64
+          - runner: windows-11-vs2026-arm
+            rust-target: aarch64-pc-windows-msvc
+            artifact-arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust-target }}
+      - name: Build Windows executables
+        run: >-
+          cargo build --locked --release
+          --target ${{ matrix.rust-target }}
+          --bin codex-gui
+          --bin codex-code-mode-host
+      - name: Package and verify Windows executables
+        shell: pwsh
+        env:
+          RUST_TARGET: ${{ matrix.rust-target }}
+          ARTIFACT_ARCH: ${{ matrix.artifact-arch }}
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $package = "codex-gui-$version-windows-$env:ARTIFACT_ARCH"
+          New-Item -ItemType Directory -Force "dist/$package" | Out-Null
+          Copy-Item "target/$env:RUST_TARGET/release/codex-gui.exe" "dist/$package/"
+          Copy-Item "target/$env:RUST_TARGET/release/codex-code-mode-host.exe" "dist/$package/"
+          if (-not (Test-Path "dist/$package/codex-gui.exe" -PathType Leaf)) { throw "codex-gui.exe is missing" }
+          if (-not (Test-Path "dist/$package/codex-code-mode-host.exe" -PathType Leaf)) { throw "codex-code-mode-host.exe is missing" }
+          Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip"
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-gui-windows-${{ matrix.artifact-arch }}
+          path: dist/*.zip
+          if-no-files-found: error

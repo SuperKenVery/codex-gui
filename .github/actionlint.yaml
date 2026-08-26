@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # This is a GitHub-hosted GA runner announced in August 2026. Keep it here
+  # until actionlint's built-in runner-label list includes it.
+  labels:
+    - windows-11-vs2026-arm

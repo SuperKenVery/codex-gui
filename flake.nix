@@ -1,6 +1,15 @@
 {
   description = "GPUI desktop shell for codex-gui";
 
+  nixConfig = {
+    extra-substituters = [
+      "https://oranc.li7g.com/ghcr.io/SuperKenVery/codex-gui-nix-cache"
+    ];
+    extra-trusted-public-keys = [
+      "codex-gui-oranc-1:M5KXc8rneTuIystz2Z53emJGdiByGib+qNBva4PS2d0="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
@@ -8,13 +17,33 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    bundlers = {
+      url = "github:NixOS/bundlers";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay, ... }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      crane,
+      rust-overlay,
+      bundlers,
+      ...
+    }:
     let
-      systems = [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" ];
+      systems = [
+        "aarch64-darwin"
+        "x86_64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      perSystem = system:
+      cargoPackage = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      version = cargoPackage.package.version;
+      perSystem =
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
@@ -25,79 +54,84 @@
             extensions = [ "rust-src" ];
           };
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
-          linuxRuntimeLibs = with pkgs; [
-            libglvnd
-            vulkan-loader
-            wayland
-          ];
-          commonArgs = {
-            pname = "codex-gui";
-            version = "0.1.0";
-            src = craneLib.cleanCargoSource ./.;
-            strictDeps = true;
-            nativeBuildInputs = with pkgs; [
-              cmake
-              pkg-config
-            ] ++ lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.llvmPackages.lld
-            ];
-            buildInputs = lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.apple-sdk
-              pkgs.libiconv
-            ] ++ (with pkgs; [
-              openssl
-            ]) ++ lib.optionals pkgs.stdenv.isLinux (with pkgs; [
-              fontconfig
-              freetype
-              libglvnd
-              libx11
-              libxcb
-              libxkbcommon
-              vulkan-loader
-              wayland
-            ]);
-            NIX_LDFLAGS = lib.optionalString pkgs.stdenv.isLinux "-rpath ${lib.makeLibraryPath linuxRuntimeLibs}";
+          codexGuiDefinition = import ./nix/codex-gui.nix {
+            inherit craneLib pkgs version;
+            icon = ./packaging/codex-gui.svg;
+            projectRoot = ./.;
+            quickjsRuntimeSrc = ./crates/codex-code-mode-runtime-quickjs/src;
           };
-          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-          codex-gui = craneLib.buildPackage (commonArgs // {
-            inherit cargoArtifacts;
-          });
+          codex-gui = codexGuiDefinition.package;
+          macosApp = import ./nix/macos_app.nix {
+            codexGui = codex-gui;
+            inherit pkgs version;
+          };
+          macosArchive = import ./nix/macos_archive.nix {
+            inherit macosApp pkgs version;
+          };
+          linuxPackages = lib.optionalAttrs pkgs.stdenv.isLinux {
+            appimage = import ./nix/app_image.nix {
+              inherit bundlers system;
+              codexGui = codex-gui;
+            };
+            deb = import ./nix/deb.nix {
+              inherit bundlers system;
+              codexGui = codex-gui;
+            };
+            rpm = import ./nix/rpm.nix {
+              inherit bundlers system;
+              codexGui = codex-gui;
+            };
+          };
+          darwinPackages = lib.optionalAttrs pkgs.stdenv.isDarwin {
+            macos-app = macosApp;
+            macos-archive = macosArchive;
+          };
         in
         {
           packages = {
             default = codex-gui;
             inherit codex-gui;
+          }
+          // linuxPackages
+          // darwinPackages;
+
+          apps.default = {
+            type = "app";
+            program = "${codex-gui}/bin/codex-gui";
           };
 
           checks = {
-            clippy = craneLib.cargoClippy (commonArgs // {
-              inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-            });
+            clippy = craneLib.cargoClippy (
+              codexGuiDefinition.commonArgs
+              // {
+                inherit (codexGuiDefinition) cargoArtifacts;
+                cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+              }
+            );
             fmt = craneLib.cargoFmt {
-              src = commonArgs.src;
+              src = codexGuiDefinition.source;
             };
           };
 
           devShells.default = craneLib.devShell {
             checks = self.checks.${system};
-            packages = if pkgs.stdenv.isLinux then (with pkgs; [
-              mangohud
-            ]) else [];
+            packages = if pkgs.stdenv.isLinux then (with pkgs; [ mangohud ]) else [ ];
             env = {
               RUST_BACKTRACE = "1";
               # Keep panic backtraces without making every recoverable anyhow
               # error capture a stack trace. GPUI creates recoverable errors in
               # hot rendering paths, where lib backtraces make scrolling jank.
               RUST_LIB_BACKTRACE = "0";
-            } // lib.optionalAttrs pkgs.stdenv.isLinux {
-              LD_LIBRARY_PATH = lib.makeLibraryPath linuxRuntimeLibs;
+            }
+            // lib.optionalAttrs pkgs.stdenv.isLinux {
+              LD_LIBRARY_PATH = lib.makeLibraryPath codexGuiDefinition.linuxRuntimeLibs;
             };
           };
         };
     in
     {
       packages = forAllSystems (system: (perSystem system).packages);
+      apps = forAllSystems (system: (perSystem system).apps);
       checks = forAllSystems (system: (perSystem system).checks);
       devShells = forAllSystems (system: (perSystem system).devShells);
     };
