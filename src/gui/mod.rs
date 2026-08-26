@@ -5,8 +5,8 @@ mod sidebar;
 mod state;
 mod widgets;
 
-pub use chat_history::ChatHistory;
 pub(crate) use chat_history::ChatHistoryEvent;
+pub use chat_history::{ChatHistory, ToolGallery};
 pub use chat_panel::ChatPanel;
 pub use side_chat::SideChat;
 pub use sidebar::Sidebar;

@@ -1,6 +1,7 @@
 mod collaboration;
 mod command;
 mod file_change;
+mod gallery;
 mod media;
 mod remote;
 mod simple;
@@ -16,7 +17,7 @@ use codex_app_server_protocol::{
 use gpui::{
     App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, prelude::*,
 };
-use gpui_component::{Sizable as _, accordion::Accordion, h_flex, theme::Theme};
+use gpui_component::{Icon, IconName, Sizable as _, accordion::Accordion, h_flex, theme::Theme};
 
 use collaboration::CollaborationTool;
 use command::CommandTool;
@@ -26,6 +27,8 @@ use remote::{DynamicTool, McpTool};
 use simple::{SimpleTool, SimpleToolElement, ToolStatus};
 use sleep::SleepTool;
 use web_search::WebSearchTool;
+
+pub use gallery::ToolGallery;
 
 #[derive(Clone, IntoElement)]
 pub(in crate::gui::chat_history) enum ToolCall {
@@ -113,24 +116,27 @@ pub(super) fn render_group(
 
     let can_toggle = collapsible && !active_tail;
     let open = !can_toggle || expanded;
-    let title_style = gpui::StyleRefinement::default().px_0().py_1();
-    let content_style = gpui::StyleRefinement::default().px_0().pb_0();
+    let title_style = gpui::StyleRefinement::default().px_3().py_2();
+    let content_style = gpui::StyleRefinement::default().px_2().pb_2();
     let accordion = Accordion::new(format!("tool-group-{key}"))
         .bordered(false)
         .xsmall()
         .w_full()
         .min_w_0()
-        .bg(theme.muted)
+        .border_1()
+        .border_color(theme.border.opacity(0.75))
+        .bg(theme.muted.opacity(0.35))
         .rounded_lg()
+        .overflow_hidden()
         .item(|item| {
             item.open(open)
                 .disabled(!can_toggle)
                 .title(render_summary(tools, theme))
                 .title_style(title_style)
                 .content_style(content_style)
-                .hover(|style| style.bg(theme.muted.opacity(0.35)).rounded(theme.radius))
+                .hover(|style| style.bg(theme.accent.opacity(0.45)))
                 .bg(theme.transparent)
-                .child(render_list(tools).p_5())
+                .child(render_list(tools, theme))
         })
         .when(can_toggle, |accordion| {
             accordion.on_toggle_click(move |_, _, cx| on_toggle(cx))
@@ -157,9 +163,24 @@ fn render_summary(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
     h_flex()
         .min_w_0()
         .items_center()
-        .gap_1p5()
+        .gap_2()
         .text_sm()
-        .child(if running > 0 {
+        .child(
+            div()
+                .size_6()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(theme.accent.opacity(0.7))
+                .child(
+                    Icon::new(IconName::Asterisk)
+                        .xsmall()
+                        .text_color(theme.accent_foreground),
+                ),
+        )
+        .child(div().min_w_0().flex_1().truncate().child(if running > 0 {
             format!(
                 "Running {} {}",
                 tools.len(),
@@ -171,26 +192,51 @@ fn render_summary(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
                 tools.len(),
                 pluralize(tools.len(), "tool call")
             )
-        })
+        }))
         .when(failed > 0, |summary| {
             summary.child(
                 div()
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.danger.opacity(0.12))
+                    .px_1p5()
+                    .py_0p5()
                     .text_xs()
-                    .text_color(theme.warning_foreground)
+                    .text_color(theme.danger)
                     .child(format!("{failed} failed")),
+            )
+        })
+        .when(running > 0, |summary| {
+            summary.child(
+                div()
+                    .flex_none()
+                    .rounded_full()
+                    .bg(theme.warning.opacity(0.14))
+                    .px_1p5()
+                    .py_0p5()
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .child(format!("{running} active")),
             )
         })
 }
 
-fn render_list(tools: &[ToolCall]) -> gpui::Div {
+fn render_list(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
     div()
         .w_full()
         .min_w_0()
         .flex()
         .flex_col()
         .items_stretch()
-        .gap_1p5()
-        .children(tools.iter().cloned())
+        .children(tools.iter().cloned().enumerate().map(|(index, tool)| {
+            div()
+                .w_full()
+                .min_w_0()
+                .when(index > 0, |row| {
+                    row.border_t_1().border_color(theme.border.opacity(0.55))
+                })
+                .child(tool)
+        }))
 }
 
 pub(in crate::gui::chat_history) fn tool_calls(

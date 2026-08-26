@@ -1,9 +1,11 @@
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
-    prelude::*, transparent_white,
+    prelude::*, px,
 };
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, spinner::Spinner};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, spinner::Spinner,
+};
 
 #[derive(Clone, Copy)]
 pub(super) enum ToolStatus {
@@ -79,52 +81,69 @@ impl ToolFrame {
 impl RenderOnce for ToolFrame {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        div()
+        h_flex()
             .max_w_full()
             .min_w_0()
             .flex_shrink(1.)
-            .flex()
-            .flex_col()
+            .items_start()
             .gap_2()
-            .rounded(theme.radius)
-            .border_3()
-            .border_color(theme.border)
-            .bg(transparent_white())
-            .px_2()
-            .py_1()
+            .px_1()
+            .py_2()
             .text_sm()
             .child(
-                h_flex()
-                    .min_w_0()
-                    .gap_1p5()
+                div()
+                    .flex_none()
+                    .size_7()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(theme.accent.opacity(0.72))
                     .child(
                         Icon::new(self.icon)
-                            .xsmall()
-                            .flex_none()
-                            .text_color(theme.muted_foreground),
-                    )
+                            .small()
+                            .text_color(theme.accent_foreground),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
                     .child(
                         div()
                             .min_w_0()
-                            .flex_1()
                             .truncate()
                             .whitespace_nowrap()
+                            .font_medium()
                             .text_color(theme.foreground)
                             .child(self.title),
                     )
-                    .child(render_trailing(self.diff, self.status, cx)),
+                    .when_some(self.detail, |this, detail| {
+                        this.child(
+                            div()
+                                .id("tool-detail")
+                                .max_h(px(176.))
+                                .min_w_0()
+                                .overflow_scrollbar()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border.opacity(0.7))
+                                .bg(theme.background.opacity(0.58))
+                                .px_2()
+                                .py_1p5()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_xs()
+                                .line_height(px(18.))
+                                .text_color(theme.muted_foreground)
+                                .whitespace_normal()
+                                .child(detail),
+                        )
+                    }),
             )
-            .when_some(self.detail, |this, detail| {
-                this.child(
-                    div()
-                        .min_w_0()
-                        .overflow_x_scrollbar()
-                        .whitespace_normal()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(detail),
-                )
-            })
+            .child(render_trailing(self.diff, self.status, cx))
     }
 }
 
@@ -133,21 +152,27 @@ fn render_trailing(diff: Option<(usize, usize)>, status: ToolStatus, cx: &App) -
     h_flex()
         .flex_none()
         .items_center()
-        .gap_1()
+        .gap_1p5()
         .when_some(diff, |trailing, (additions, deletions)| {
-            trailing
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.success_foreground)
-                        .child(format!("+{additions}")),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.danger_foreground)
-                        .child(format!("-{deletions}")),
-                )
+            trailing.child(
+                h_flex()
+                    .gap_1()
+                    .rounded_full()
+                    .bg(theme.muted.opacity(0.8))
+                    .px_1p5()
+                    .py_0p5()
+                    .text_xs()
+                    .child(
+                        div()
+                            .text_color(theme.success)
+                            .child(format!("+{additions}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.danger)
+                            .child(format!("-{deletions}")),
+                    ),
+            )
         })
         .child(render_status(status, cx))
         .into_any_element()
@@ -156,17 +181,38 @@ fn render_trailing(diff: Option<(usize, usize)>, status: ToolStatus, cx: &App) -
 fn render_status(status: ToolStatus, cx: &App) -> AnyElement {
     let theme = cx.theme();
     match status {
-        ToolStatus::Running => Spinner::new()
-            .xsmall()
-            .color(theme.warning_foreground)
+        ToolStatus::Running => h_flex()
+            .gap_1()
+            .rounded_full()
+            .bg(theme.warning.opacity(0.14))
+            .px_1p5()
+            .py_0p5()
+            .text_xs()
+            .text_color(theme.warning)
+            .child(Spinner::new().xsmall().color(theme.warning))
+            .child("Running")
             .into_any_element(),
-        ToolStatus::Succeeded => Icon::new(IconName::Check)
-            .xsmall()
-            .text_color(theme.success_foreground)
+        ToolStatus::Succeeded => h_flex()
+            .gap_1()
+            .rounded_full()
+            .bg(theme.success.opacity(0.12))
+            .px_1p5()
+            .py_0p5()
+            .text_xs()
+            .text_color(theme.success)
+            .child(Icon::new(IconName::Check).xsmall())
+            .child("Done")
             .into_any_element(),
-        ToolStatus::Failed => Icon::new(IconName::CircleX)
-            .xsmall()
-            .text_color(theme.danger_foreground)
+        ToolStatus::Failed => h_flex()
+            .gap_1()
+            .rounded_full()
+            .bg(theme.danger.opacity(0.12))
+            .px_1p5()
+            .py_0p5()
+            .text_xs()
+            .text_color(theme.danger)
+            .child(Icon::new(IconName::CircleX).xsmall())
+            .child("Failed")
             .into_any_element(),
     }
 }

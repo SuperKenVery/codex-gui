@@ -23,6 +23,7 @@ use gpui_component::ActiveTheme as _;
 
 use super::view::ChatHistory;
 use crate::gui::{PendingApproval, PendingUserInputRequest};
+pub use tools::ToolGallery;
 pub(super) use tools::{ToolCall, is_tool_item, tool_calls, tools_done};
 
 #[derive(Clone)]
