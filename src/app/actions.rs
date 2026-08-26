@@ -1,15 +1,19 @@
 //! Handle user intents
 
 use super::{
-    CodexGui,
+    CodexGui, PendingThread,
     thread_mapping::{empty_chat_entity, project_name_from_path, should_start_thread_for_turn},
 };
 use crate::{
+    global_state::CodexGlobalState,
     gui::{ApprovalReviewerMode, ChatState, ProjectState, single_line_title},
-    workspace::workspace_path,
 };
+use anyhow::{Context as _, Result, anyhow};
+use chrono::Local;
 use codex_app_server_protocol::RequestId;
 use gpui::{AppContext, Context};
+use std::{fs, io::ErrorKind, path::PathBuf};
+use uuid::Uuid;
 
 impl CodexGui {
     pub(crate) fn dismiss_notice(
@@ -26,14 +30,27 @@ impl CodexGui {
             state.select_project(index);
             cx.notify();
         });
+        self.ui_state.update(cx, |state, cx| {
+            state.select_new_chat_project();
+            cx.notify();
+        });
     }
 
     pub(crate) fn open_new_chat(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let projectless = state.active_projectless_chat.is_some() || state.projects.is_empty();
         self.ui_state.update(cx, |state, cx| {
-            state.open_new_chat();
+            state.open_new_chat(projectless);
             cx.notify();
         });
         cx.notify();
+    }
+
+    pub(crate) fn select_new_chat_projectless(&mut self, cx: &mut Context<Self>) {
+        self.ui_state.update(cx, |state, cx| {
+            state.select_new_chat_projectless();
+            cx.notify();
+        });
     }
 
     pub(crate) fn add_project(&mut self, path: String, cx: &mut Context<Self>) {
@@ -258,12 +275,8 @@ impl CodexGui {
     ///
     /// Composer submission normally goes through `submit_turn_text` so the first
     /// prompt can be sent after the asynchronous thread creation completes.
-    pub(crate) fn start_new_thread(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_new_thread(&mut self, cwd: String, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).chat_settings.clone();
-        let cwd = self
-            .active_project_entity(cx)
-            .map(|project| project.read(cx).path.to_string())
-            .unwrap_or_else(workspace_path);
         tracing::info!(cwd, "starting thread");
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
@@ -284,7 +297,7 @@ impl CodexGui {
         text: String,
         cx: &mut Context<Self>,
     ) {
-        if self.ui_state.read(cx).active_turn.is_some() || self.pending_thread_chat.is_some() {
+        if self.ui_state.read(cx).active_turn.is_some() || self.pending_thread.is_some() {
             return;
         }
 
@@ -297,10 +310,26 @@ impl CodexGui {
         let new_chat_open = self.ui_state.read(cx).new_chat_open;
 
         if should_start_thread_for_turn(new_chat_open, active_thread_id.as_deref()) {
-            let Some(project) = self.active_project_entity(cx) else {
-                return;
+            let projectless = self.ui_state.read(cx).new_chat_projectless
+                || self.active_project_entity(cx).is_none();
+            let cwd = if projectless {
+                match new_projectless_chat_directory() {
+                    Ok(cwd) => cwd,
+                    Err(error) => {
+                        self.apply_bridge_error(
+                            format!("failed to create project-less chat directory: {error}"),
+                            cx,
+                        );
+                        return;
+                    }
+                }
+            } else {
+                self.active_project_entity(cx)
+                    .expect("project checked above")
+                    .read(cx)
+                    .path
+                    .to_string()
             };
-            let cwd = project.read(cx).path.to_string();
             let title = single_line_title(&text);
             let pending_chat_id = format!("pending-{client_user_message_id}");
             let pending_chat = cx.new(|_| {
@@ -313,24 +342,42 @@ impl CodexGui {
                 chat.begin_user_message(client_user_message_id, text);
                 chat
             });
-            project.update(cx, |project, cx| {
-                project.chats.retain(|chat| {
-                    let chat = chat.read(cx);
-                    chat.id.as_str() != "empty" && !chat.id.starts_with("pending-")
+            if projectless {
+                self.state.update(cx, |state, cx| {
+                    state.projectless_chats.retain(|chat| {
+                        let chat = chat.read(cx);
+                        chat.id.as_str() != "empty" && !chat.id.starts_with("pending-")
+                    });
+                    state.projectless_chats.insert(0, pending_chat.clone());
+                    state.select_projectless_chat(0);
+                    cx.notify();
                 });
-                project.chats.insert(0, pending_chat.clone());
-                cx.notify();
-            });
-            self.state.update(cx, |state, cx| {
-                state.select_chat(0);
-                cx.notify();
-            });
+            } else {
+                let project = self
+                    .active_project_entity(cx)
+                    .expect("project checked above");
+                project.update(cx, |project, cx| {
+                    project.chats.retain(|chat| {
+                        let chat = chat.read(cx);
+                        chat.id.as_str() != "empty" && !chat.id.starts_with("pending-")
+                    });
+                    project.chats.insert(0, pending_chat.clone());
+                    cx.notify();
+                });
+                self.state.update(cx, |state, cx| {
+                    state.select_chat(0);
+                    cx.notify();
+                });
+            }
             self.ui_state.update(cx, |state, cx| {
                 state.close_new_chat();
                 cx.notify();
             });
-            self.pending_thread_chat = Some(pending_chat);
-            self.start_new_thread(cx);
+            self.pending_thread = Some(PendingThread {
+                chat: pending_chat,
+                projectless,
+            });
+            self.start_new_thread(cwd, cx);
             return;
         }
 
@@ -452,6 +499,7 @@ impl CodexGui {
             state.set_model(model);
             cx.notify();
         });
+        self.persist_model_settings(cx);
         self.sync_active_thread_settings(cx);
     }
 
@@ -460,6 +508,7 @@ impl CodexGui {
             state.set_effort(effort);
             cx.notify();
         });
+        self.persist_model_settings(cx);
         self.sync_active_thread_settings(cx);
     }
 
@@ -637,4 +686,42 @@ impl CodexGui {
         })
         .detach();
     }
+
+    fn persist_model_settings(&mut self, cx: &mut Context<Self>) {
+        let settings = self.state.read(cx).chat_settings.clone();
+        if let Err(error) =
+            CodexGlobalState::update_last_selected_model(&settings.model, &settings.effort)
+        {
+            self.apply_bridge_error(format!("failed to persist model settings: {error}"), cx);
+        }
+    }
+}
+
+fn new_projectless_chat_directory() -> Result<String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("failed to locate the home directory"))?;
+    let documents = home.join("Documents");
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let parent = documents.join("Codex").join(date);
+    fs::create_dir_all(&parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+
+    for _ in 0..10 {
+        let random = Uuid::new_v4().simple().to_string();
+        let path: PathBuf = parent.join(format!("chat-{}", &random[..8]));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path.to_string_lossy().into_owned()),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", path.display()));
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "failed to allocate a unique project-less chat directory under {}",
+        parent.display()
+    ))
 }

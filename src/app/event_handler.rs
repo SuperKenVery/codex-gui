@@ -1,8 +1,10 @@
 use super::{CodexGui, thread_mapping::*};
 use crate::bridge::BridgeEvent;
+use crate::global_state::CodexGlobalState;
 use crate::gui::{ChatState, HistoryNotice, ProjectState};
 use codex_app_server_protocol::{ServerNotification, Thread, ThreadItem};
 use gpui::{AppContext, Context, Entity};
+use tracing::debug;
 
 impl CodexGui {
     pub(super) fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
@@ -26,6 +28,7 @@ impl CodexGui {
         notification: ServerNotification,
         cx: &mut Context<Self>,
     ) {
+        debug!("{:?}", notification);
         match notification {
             ServerNotification::ThreadStarted(params) => {
                 self.apply_thread_started(params.thread, cx);
@@ -494,7 +497,16 @@ impl CodexGui {
         let thread_id = thread.id.clone();
         let updated_at = thread.updated_at;
         let cwd = thread.cwd.to_string_lossy().into_owned();
-        let pending_chat = self.pending_thread_chat.take();
+        let pending = self.pending_thread.take();
+        let known_projectless = CodexGlobalState::load()
+            .map(|state| state.projectless_thread_ids().contains(&thread_id))
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to classify started thread from global state");
+                false
+            });
+        let projectless =
+            known_projectless || pending.as_ref().is_some_and(|pending| pending.projectless);
+        let pending_chat = pending.as_ref().map(|pending| pending.chat.clone());
         let chat = if let Some(chat) = pending_chat.as_ref() {
             let title = thread_title(thread.name.as_deref(), &thread.preview);
             let subtitle = format!(
@@ -510,22 +522,47 @@ impl CodexGui {
         } else {
             chat_entity_from_thread(thread, cx)
         };
-        let mut selected_chat_index = 0;
-        if let Some(project) = self.ensure_project_for_cwd(&cwd, cx) {
-            selected_chat_index = project.update(cx, |project, cx| {
-                project.mark_thread_updated_at(updated_at);
-                let selected_chat_index = project
-                    .chat_index_by_id(&thread_id, cx)
-                    .unwrap_or_else(|| project.upsert_chat(chat, &thread_id, cx));
+
+        if projectless {
+            if let Err(error) = CodexGlobalState::add_projectless_thread(&thread_id) {
+                chat.update(cx, |chat, cx| {
+                    chat.upsert_notice(
+                        "global-state-write-error".into(),
+                        format!("Failed to persist this project-less chat: {error}"),
+                    );
+                    cx.notify();
+                });
+            }
+            self.state.update(cx, |state, cx| {
+                let index = state
+                    .projectless_chats
+                    .iter()
+                    .position(|candidate| candidate.read(cx).id == thread_id)
+                    .unwrap_or_else(|| {
+                        state.projectless_chats.insert(0, chat.clone());
+                        0
+                    });
+                state.select_projectless_chat(index);
                 cx.notify();
-                selected_chat_index
+            });
+        } else {
+            let mut selected_chat_index = 0;
+            if let Some(project) = self.ensure_project_for_cwd(&cwd, cx) {
+                selected_chat_index = project.update(cx, |project, cx| {
+                    project.mark_thread_updated_at(updated_at);
+                    let selected_chat_index = project
+                        .chat_index_by_id(&thread_id, cx)
+                        .unwrap_or_else(|| project.upsert_chat(chat, &thread_id, cx));
+                    cx.notify();
+                    selected_chat_index
+                });
+            }
+            self.state.update(cx, |state, cx| {
+                state.sort_projects_by_recent_activity(cx);
+                state.select_chat(selected_chat_index);
+                cx.notify();
             });
         }
-        self.state.update(cx, |state, cx| {
-            state.sort_projects_by_recent_activity(cx);
-            state.select_chat(selected_chat_index);
-            cx.notify();
-        });
         self.ui_state.update(cx, |state, cx| {
             state.close_new_chat();
             cx.notify();

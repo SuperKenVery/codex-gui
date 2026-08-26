@@ -318,6 +318,13 @@ impl ChatPanel {
         });
     }
 
+    fn select_new_chat_projectless(&mut self, cx: &mut Context<Self>) {
+        let parent = self.parent.clone();
+        cx.defer(move |cx| {
+            let _ = parent.update(cx, |parent, cx| parent.select_new_chat_projectless(cx));
+        });
+    }
+
     fn add_project_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.project_path_input.update(cx, |input, cx| {
             let path = input.value().trim().to_string();
@@ -612,7 +619,7 @@ impl ChatPanel {
     }
 
     fn new_chat_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (projects, active_project, active_project_name) = {
+        let (projects, active_project, active_project_name, projectless) = {
             let state = self.state.read(cx);
             let active_project_name = state
                 .active_project()
@@ -622,7 +629,13 @@ impl ChatPanel {
                 state.projects.clone(),
                 state.active_project,
                 active_project_name,
+                self.ui_state.read(cx).new_chat_projectless || state.projects.is_empty(),
             )
+        };
+        let heading = if projectless {
+            "What should we build?".to_owned()
+        } else {
+            format!("What should we build in {active_project_name}?")
         };
 
         div()
@@ -643,7 +656,7 @@ impl ChatPanel {
                     .text_center()
                     .text_3xl()
                     .font_weight(gpui::FontWeight::LIGHT)
-                    .child(format!("What should we build in {active_project_name}?")),
+                    .child(heading),
             )
             .child(
                 div()
@@ -660,13 +673,24 @@ impl ChatPanel {
                             .items_center()
                             .gap_2()
                             .overflow_x_scrollbar()
+                            .child(
+                                Button::new("new-chat-projectless")
+                                    .small()
+                                    .ghost()
+                                    .selected(projectless)
+                                    .label("No project")
+                                    .tooltip("Create a chat in Documents/Codex")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.select_new_chat_projectless(cx)
+                                    })),
+                            )
                             .children(projects.iter().enumerate().map(|(index, project)| {
                                 let project = project.read(cx);
                                 Button::new(format!("new-chat-project-{index}"))
                                     .small()
                                     .ghost()
-                                    .selected(index == active_project)
-                                    .icon(if index == active_project {
+                                    .selected(!projectless && index == active_project)
+                                    .icon(if !projectless && index == active_project {
                                         IconName::FolderOpen
                                     } else {
                                         IconName::Folder
@@ -734,8 +758,7 @@ impl ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let new_chat_open =
-            self.state.read(cx).active_project().is_some() && self.ui_state.read(cx).new_chat_open;
+        let new_chat_open = self.ui_state.read(cx).new_chat_open;
         let active_chat = self.state.read(cx).active_chat_entity(cx);
         let (title, subtitle, active_thread_id) = active_chat
             .map(|chat| {

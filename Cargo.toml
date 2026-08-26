@@ -33,6 +33,7 @@ codex-code-mode-host = { git = "https://github.com/openai/codex.git", tag = "rus
 codex-core = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 codex-protocol = { git = "https://github.com/openai/codex.git", tag = "rust-v0.147.0" }
 anyhow = "1"
+chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

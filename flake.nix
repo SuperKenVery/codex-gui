@@ -122,6 +122,7 @@
               # error capture a stack trace. GPUI creates recoverable errors in
               # hot rendering paths, where lib backtraces make scrolling jank.
               RUST_LIB_BACKTRACE = "0";
+              RUST_LOG = "warn,codex_gui=debug";
             }
             // lib.optionalAttrs pkgs.stdenv.isLinux {
               LD_LIBRARY_PATH = lib.makeLibraryPath codexGuiDefinition.linuxRuntimeLibs;

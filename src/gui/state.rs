@@ -1022,6 +1022,7 @@ fn apply_turn_completion(existing: &mut Turn, completed: Turn) {
 pub struct UiState {
     pub side_chat_open: bool,
     pub new_chat_open: bool,
+    pub new_chat_projectless: bool,
     pub active_turn: Option<ActiveTurn>,
     pub loading_thread_id: Option<String>,
 }
@@ -1031,17 +1032,27 @@ impl UiState {
         Self {
             side_chat_open: false,
             new_chat_open: true,
+            new_chat_projectless: false,
             active_turn: None,
             loading_thread_id: None,
         }
     }
 
-    pub fn open_new_chat(&mut self) {
+    pub fn open_new_chat(&mut self, projectless: bool) {
         self.new_chat_open = true;
+        self.new_chat_projectless = projectless;
     }
 
     pub fn close_new_chat(&mut self) {
         self.new_chat_open = false;
+    }
+
+    pub fn select_new_chat_project(&mut self) {
+        self.new_chat_projectless = false;
+    }
+
+    pub fn select_new_chat_projectless(&mut self) {
+        self.new_chat_projectless = true;
     }
 
     pub fn toggle_side_chat(&mut self) {

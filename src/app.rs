@@ -18,12 +18,17 @@ pub struct CodexGui {
     state: Entity<GuiState>,
     ui_state: Entity<UiState>,
     bridge: AppServerBridge,
-    pending_thread_chat: Option<Entity<ChatState>>,
+    pending_thread: Option<PendingThread>,
     sidebar: Entity<Sidebar>,
     chat_panel: Entity<ChatPanel>,
     side_chat: Entity<SideChat>,
     _bridge_task: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+struct PendingThread {
+    chat: Entity<ChatState>,
+    projectless: bool,
 }
 
 impl CodexGui {
@@ -68,7 +73,7 @@ impl CodexGui {
             state,
             ui_state,
             bridge,
-            pending_thread_chat: None,
+            pending_thread: None,
             sidebar,
             chat_panel,
             side_chat,

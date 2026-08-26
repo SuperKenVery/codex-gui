@@ -3255,6 +3255,7 @@ name = "codex-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "codex-app-server-client",
  "codex-app-server-protocol",

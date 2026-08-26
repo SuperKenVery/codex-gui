@@ -6,10 +6,10 @@ use super::{
 };
 use crate::{
     bridge::BridgeError,
+    global_state::{CodexGlobalState, LastSelectedModel},
     gui::{ChatState, ModelOption, PermissionProfileOption, ProjectState},
 };
 use codex_app_server_protocol::Thread;
-use codex_core::config::find_codex_home;
 use gpui::{AppContext, Context, Entity};
 use std::collections::{HashMap, HashSet};
 
@@ -159,8 +159,24 @@ impl CodexGui {
     ) {
         match result {
             Ok(models) => {
+                let last_selected_model = last_selected_model();
                 self.state.update(cx, |state, cx| {
                     state.set_available_models(models);
+                    if let Some(selection) = last_selected_model
+                        && let Some(model) =
+                            resolve_model_id(&selection.slug, &state.available_models)
+                    {
+                        state.set_model(model.clone());
+                        if let Some(thinking_effort) = selection.thinking_effort
+                            && let Some(effort) = resolve_reasoning_effort(
+                                &thinking_effort,
+                                &model,
+                                &state.available_models,
+                            )
+                        {
+                            state.set_effort(effort);
+                        }
+                    }
                     cx.notify();
                 });
             }
@@ -193,8 +209,8 @@ impl CodexGui {
             Ok(thread) => self.apply_thread_started(thread, cx),
             Err(err) => {
                 let message = err.to_string();
-                if let Some(chat) = self.pending_thread_chat.take() {
-                    chat.update(cx, |chat, cx| {
+                if let Some(pending) = self.pending_thread.take() {
+                    pending.chat.update(cx, |chat, cx| {
                         if let Some((client_id, _)) = chat.pending_user_message_request() {
                             chat.fail_user_message(&client_id, message.clone());
                         }
@@ -291,29 +307,60 @@ fn loaded_chats(
 /// Thread IDs that the Codex desktop marks as project-less, so they are shown
 /// outside of any project group in the sidebar.
 fn projectless_thread_ids() -> HashSet<String> {
-    let Ok(home) = find_codex_home() else {
-        return HashSet::new();
-    };
-    let Ok(contents) = std::fs::read_to_string(home.join(".codex-global-state.json")) else {
-        return HashSet::new();
-    };
-    parse_projectless_thread_ids(&contents)
+    CodexGlobalState::load()
+        .map(|state| state.projectless_thread_ids())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to load project-less thread ids");
+            HashSet::new()
+        })
 }
 
-fn parse_projectless_thread_ids(contents: &str) -> HashSet<String> {
-    let Ok(state) = serde_json::from_str::<serde_json::Value>(contents) else {
-        return HashSet::new();
-    };
-    state
-        .get("projectless-thread-ids")
-        .and_then(serde_json::Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect()
+fn last_selected_model() -> Option<LastSelectedModel> {
+    CodexGlobalState::load()
+        .map(|state| state.last_selected_model())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to load last selected model");
+            None
         })
-        .unwrap_or_default()
+}
+
+fn resolve_model_id(slug: &str, models: &[ModelOption]) -> Option<String> {
+    if models.iter().any(|model| model.id == slug) {
+        return Some(slug.to_owned());
+    }
+
+    let family = slug
+        .strip_suffix("-thinking")
+        .or_else(|| slug.strip_suffix("-pro"))
+        .unwrap_or(slug);
+    let version = family.strip_prefix("gpt-").and_then(|version| {
+        let (major, minor) = version.split_once('-')?;
+        (!major.is_empty() && !minor.is_empty() && !minor.contains('-'))
+            .then(|| format!("gpt-{major}.{minor}"))
+    })?;
+
+    [version.clone(), format!("{version}-sol")]
+        .into_iter()
+        .find(|candidate| models.iter().any(|model| model.id == *candidate))
+}
+
+fn resolve_reasoning_effort(
+    thinking_effort: &str,
+    model_id: &str,
+    models: &[ModelOption],
+) -> Option<String> {
+    let effort = match thinking_effort {
+        "standard" => "medium",
+        "extended" => "high",
+        effort => effort,
+    };
+    models
+        .iter()
+        .find(|model| model.id == model_id)?
+        .supported_efforts
+        .iter()
+        .any(|supported| supported == effort)
+        .then(|| effort.to_owned())
 }
 
 #[cfg(test)]
@@ -321,16 +368,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_projectless_thread_ids() {
-        let ids = parse_projectless_thread_ids(
-            r#"{"projectless-thread-ids": ["abc", "def"], "other": 1}"#,
-        );
-        assert_eq!(ids, HashSet::from(["abc".to_string(), "def".to_string()]));
-    }
+    fn resolves_desktop_model_and_effort_to_available_codex_options() {
+        let models = vec![ModelOption {
+            id: "gpt-5.6-sol".to_string(),
+            display_name: "GPT-5.6-Sol".to_string(),
+            supported_efforts: vec![
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+            ],
+            default_effort: "medium".to_string(),
+        }];
 
-    #[test]
-    fn missing_projectless_field_is_empty() {
-        assert!(parse_projectless_thread_ids(r#"{"other": []}"#).is_empty());
-        assert!(parse_projectless_thread_ids("not json").is_empty());
+        let model = resolve_model_id("gpt-5-6-thinking", &models).unwrap();
+        assert_eq!(model, "gpt-5.6-sol");
+        assert_eq!(
+            resolve_reasoning_effort("extended", &model, &models).as_deref(),
+            Some("high")
+        );
     }
 }

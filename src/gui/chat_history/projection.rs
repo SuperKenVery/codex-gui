@@ -185,12 +185,16 @@ fn append_items(
                 index += 1;
             }
             ThreadItem::AgentMessage { .. } => {
-                let tools_end = consecutive_tools_end(items, index + 1);
+                let tools_end = tool_group_end(items, index + 1, |id| chat.item_is_streaming(id));
+                let tools = items[index + 1..tools_end]
+                    .iter()
+                    .filter(|item| is_tool_item(item))
+                    .collect::<Vec<_>>();
                 append_agent(
                     transcript,
                     chat,
                     &items[index],
-                    &items[index + 1..tools_end],
+                    &tools,
                     tools_end == items.len(),
                     expanded_tool_groups,
                 );
@@ -227,11 +231,14 @@ fn append_items(
                     }
                     body.push_str(&content);
                 }
-                transcript.push_block(HistoryBlock::Reasoning {
-                    key: id.clone(),
-                    body: body.into(),
-                    running: chat.item_is_streaming(id),
-                });
+                let running = chat.item_is_streaming(id);
+                if running || !body.is_empty() {
+                    transcript.push_block(HistoryBlock::Reasoning {
+                        key: id.clone(),
+                        body: body.into(),
+                        running,
+                    });
+                }
                 index += 1;
             }
             ThreadItem::HookPrompt { id, fragments } => {
@@ -288,16 +295,18 @@ fn append_items(
                 index += 1;
             }
             item if is_tool_item(item) => {
-                let tools_end = consecutive_tools_end(items, index);
+                let tools_end = tool_group_end(items, index, |id| chat.item_is_streaming(id));
+                let tools = items[index..tools_end]
+                    .iter()
+                    .filter(|item| is_tool_item(item))
+                    .collect::<Vec<_>>();
                 append_tool_group(
                     transcript,
                     chat,
                     item.id(),
-                    &items[index..tools_end],
+                    &tools,
                     tools_end == items.len()
-                        && !tools_done(&items[index..tools_end].iter().collect::<Vec<_>>(), |id| {
-                            chat.item_is_streaming(id)
-                        }),
+                        && !tools_done(&tools, |id| chat.item_is_streaming(id)),
                     expanded_tool_groups,
                 );
                 index = tools_end;
@@ -311,7 +320,7 @@ fn append_agent(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
     item: &ThreadItem,
-    tools: &[ThreadItem],
+    tools: &[&ThreadItem],
     tool_group_at_tail: bool,
     expanded_tool_groups: &HashSet<String>,
 ) {
@@ -341,10 +350,7 @@ fn append_agent(
             chat,
             id,
             tools,
-            tool_group_at_tail
-                && !tools_done(&tools.iter().collect::<Vec<_>>(), |id| {
-                    chat.item_is_streaming(id)
-                }),
+            tool_group_at_tail && !tools_done(tools, |id| chat.item_is_streaming(id)),
             expanded_tool_groups,
         );
     }
@@ -354,28 +360,52 @@ fn append_tool_group(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
     key: &str,
-    tools: &[ThreadItem],
+    tools: &[&ThreadItem],
     active_tail: bool,
     expanded_tool_groups: &HashSet<String>,
 ) {
-    let tool_refs = tools.iter().collect::<Vec<_>>();
     transcript.push_block(HistoryBlock::ToolGroup {
         key: key.to_string(),
-        tools: tool_calls(&tool_refs, &chat.tool_progress, |id| {
-            chat.item_is_streaming(id)
-        }),
+        tools: tool_calls(tools, &chat.tool_progress, |id| chat.item_is_streaming(id)),
         expanded: expanded_tool_groups.contains(key),
         collapsible: true,
         active_tail,
     });
 }
 
-fn consecutive_tools_end(items: &[ThreadItem], start: usize) -> usize {
+fn tool_group_end(
+    items: &[ThreadItem],
+    start: usize,
+    is_streaming: impl Fn(&str) -> bool,
+) -> usize {
+    if items.get(start).is_none_or(|item| !is_tool_item(item)) {
+        return start;
+    }
+
     let mut end = start;
-    while end < items.len() && is_tool_item(&items[end]) {
-        end += 1;
+    while let Some(item) = items.get(end) {
+        if is_tool_item(item) || is_completed_empty_reasoning(item, &is_streaming) {
+            end += 1;
+        } else {
+            break;
+        }
     }
     end
+}
+
+fn is_completed_empty_reasoning(item: &ThreadItem, is_streaming: &impl Fn(&str) -> bool) -> bool {
+    let ThreadItem::Reasoning {
+        id,
+        summary,
+        content,
+    } = item
+    else {
+        return false;
+    };
+
+    !is_streaming(id)
+        && summary.iter().all(String::is_empty)
+        && content.iter().all(String::is_empty)
 }
 
 struct TurnFold {
@@ -478,4 +508,59 @@ fn user_input_text(content: &[UserInput]) -> String {
         })
         .collect::<Vec<String>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_app_server_protocol::SleepItem;
+
+    use super::*;
+
+    #[test]
+    fn tool_group_crosses_completed_empty_reasoning() {
+        let items = vec![
+            sleep_tool("tool-1"),
+            reasoning("reasoning-1", ""),
+            sleep_tool("tool-2"),
+        ];
+
+        assert_eq!(tool_group_end(&items, 0, |_| false), items.len());
+    }
+
+    #[test]
+    fn tool_group_stops_at_non_empty_reasoning() {
+        let items = vec![
+            sleep_tool("tool-1"),
+            reasoning("reasoning-1", "Still investigating"),
+            sleep_tool("tool-2"),
+        ];
+
+        assert_eq!(tool_group_end(&items, 0, |_| false), 1);
+    }
+
+    #[test]
+    fn tool_group_stops_at_streaming_empty_reasoning() {
+        let items = vec![
+            sleep_tool("tool-1"),
+            reasoning("reasoning-1", ""),
+            sleep_tool("tool-2"),
+        ];
+
+        assert_eq!(tool_group_end(&items, 0, |id| id == "reasoning-1"), 1);
+    }
+
+    fn sleep_tool(id: &str) -> ThreadItem {
+        ThreadItem::Sleep(SleepItem {
+            id: id.to_string(),
+            duration_ms: 1,
+        })
+    }
+
+    fn reasoning(id: &str, summary: &str) -> ThreadItem {
+        ThreadItem::Reasoning {
+            id: id.to_string(),
+            summary: vec![summary.to_string()],
+            content: Vec::new(),
+        }
+    }
 }

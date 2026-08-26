@@ -1,5 +1,6 @@
 mod app;
 mod bridge;
+mod global_state;
 pub mod gui;
 mod workspace;
 
