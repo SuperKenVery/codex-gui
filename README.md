@@ -10,6 +10,9 @@ Opensource desktop GUI app for codex. No electron, built with `gpui`.
 
 https://github.com/user-attachments/assets/75e13e95-1d42-4869-a9c0-9a102414f130
 
+## Installation
+
+You can download build artifacts from github action runs.
 
 
 ## Run
@@ -17,7 +20,7 @@ https://github.com/user-attachments/assets/75e13e95-1d42-4869-a9c0-9a102414f130
 ```sh
 nix develop
 cargo build --bin codex-code-mode-host
-cargo run
+cargo run --bin codex-gui
 ```
 
 The local code-mode host keeps Codex's upstream transport and session protocol,
