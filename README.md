@@ -7,6 +7,8 @@ Opensource desktop GUI app for codex. No electron, built with `gpui`.
   <img width="49%" alt="image" src="https://github.com/user-attachments/assets/0b7ddc63-6b83-48fd-928d-6a46ef20fec4" />
 </p>
 
+> The frame rate is actually steady 60fps when using. HUD shows instable frame interval because there were no user interaction at that time, so no new frames were generated.
+
 
 https://github.com/user-attachments/assets/75e13e95-1d42-4869-a9c0-9a102414f130
 
