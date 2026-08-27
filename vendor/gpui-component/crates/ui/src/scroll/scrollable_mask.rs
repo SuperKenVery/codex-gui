@@ -11,7 +11,7 @@ use gpui::{
 use gpui::{Corners, Pixels};
 
 use super::scrollable::caller_id;
-use crate::{AxisExt, OngoingScrollExt as _, StyledExt as _};
+use crate::{AxisExt, OngoingScrollExt as _, StyledExt as _, scroll::ScrollbarHandle};
 
 /// A horizontal scroll viewport that only consumes horizontal wheel deltas.
 ///
@@ -66,17 +66,20 @@ pub(crate) fn horizontal_scroll_area(
 /// `overscroll-behavior: auto` chaining), while a horizontal mask keeps
 /// consuming it — a bubbled horizontal delta would get mapped onto a
 /// vertical-only ancestor by gpui's own wheel listener (see #2468).
-pub struct ScrollableMask {
+pub struct ScrollableMask<H = ScrollHandle> {
     axis: Axis,
     id: ElementId,
-    scroll_handle: ScrollHandle,
+    scroll_handle: H,
     debug: Option<Hsla>,
 }
 
-impl ScrollableMask {
+impl<H> ScrollableMask<H>
+where
+    H: ScrollbarHandle + Clone,
+{
     /// Create a new scrollable mask element.
     #[track_caller]
-    pub fn new(axis: Axis, scroll_handle: &ScrollHandle) -> Self {
+    pub fn new(axis: Axis, scroll_handle: &H) -> Self {
         Self {
             scroll_handle: scroll_handle.clone(),
             axis,
@@ -102,7 +105,10 @@ impl ScrollableMask {
     }
 }
 
-impl IntoElement for ScrollableMask {
+impl<H> IntoElement for ScrollableMask<H>
+where
+    H: ScrollbarHandle + Clone,
+{
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -110,7 +116,10 @@ impl IntoElement for ScrollableMask {
     }
 }
 
-impl Element for ScrollableMask {
+impl<H> Element for ScrollableMask<H>
+where
+    H: ScrollbarHandle + Clone,
+{
     type RequestLayoutState = ();
     type PrepaintState = Hitbox;
 
@@ -252,7 +261,9 @@ impl Element for ScrollableMask {
                         // pushes the shared offset beyond the edge unclamped
                         // (the div only clamps on prepaint), and that
                         // transient overscroll would read as "room to scroll".
-                        let axis_max = scroll_handle.max_offset().y.max(px(0.));
+                        let axis_max = (scroll_handle.content_size().height
+                            - scroll_handle.viewport_bounds().size.height)
+                            .max(px(0.));
                         let current = offset.y.clamp(-axis_max, px(0.));
                         let new_offset = (current + delta.y).clamp(-axis_max, px(0.));
                         if new_offset == current {

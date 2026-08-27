@@ -15,10 +15,12 @@ use codex_app_server_protocol::{
     PatchApplyStatus, ThreadItem,
 };
 use gpui::{
-    App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, prelude::*,
+    App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, WeakEntity, Window, div,
+    prelude::*,
 };
 use gpui_component::{Icon, IconName, Sizable as _, accordion::Accordion, h_flex, theme::Theme};
 
+use crate::gui::ChatState;
 use collaboration::CollaborationTool;
 use command::CommandTool;
 use file_change::FileChangeTool;
@@ -44,14 +46,19 @@ pub(in crate::gui::chat_history) enum ToolCall {
 }
 
 impl ToolCall {
-    fn new(item: &ThreadItem, progress: Option<&[SharedString]>, streaming: bool) -> Option<Self> {
+    fn new(
+        item: &ThreadItem,
+        progress: Option<&[SharedString]>,
+        chat: WeakEntity<ChatState>,
+        streaming: bool,
+    ) -> Option<Self> {
         let status = tool_status(item, streaming);
         Some(match item {
             ThreadItem::CommandExecution { .. } => {
-                Self::Command(CommandTool::new(item, status, progress)?)
+                Self::Command(CommandTool::new(item, status, progress, chat)?)
             }
             ThreadItem::FileChange { .. } => {
-                Self::FileChange(FileChangeTool::new(item, status, progress)?)
+                Self::FileChange(FileChangeTool::new(item, status, progress, chat)?)
             }
             ThreadItem::McpToolCall { .. } => Self::Mcp(McpTool::new(item, status, progress)?),
             ThreadItem::DynamicToolCall { .. } => {
@@ -242,6 +249,7 @@ fn render_list(tools: &[ToolCall], theme: &Theme) -> gpui::Div {
 pub(in crate::gui::chat_history) fn tool_calls(
     tools: &[&ThreadItem],
     progress: &HashMap<String, Vec<SharedString>>,
+    chat: WeakEntity<ChatState>,
     is_streaming: impl Fn(&str) -> bool,
 ) -> Arc<[ToolCall]> {
     tools
@@ -250,6 +258,7 @@ pub(in crate::gui::chat_history) fn tool_calls(
             ToolCall::new(
                 tool,
                 progress.get(tool.id()).map(Vec::as_slice),
+                chat.clone(),
                 is_streaming(tool.id()),
             )
         })

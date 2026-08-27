@@ -1,5 +1,10 @@
 use futures::Stream as _;
-use std::{ops::RangeInclusive, pin::Pin, sync::Arc, task::Poll};
+use std::{
+    ops::{Range, RangeInclusive},
+    pin::Pin,
+    sync::Arc,
+    task::Poll,
+};
 
 use gpui::{
     App, AppContext as _, Bounds, Context, DefiniteLength, FocusHandle, FollowMode, IntoElement,
@@ -137,7 +142,9 @@ impl TextViewState {
 
                         match parsed_update.result {
                             Ok(content) => {
-                                if let Some(preserved_block_count) =
+                                if let Some(layout_splice) = parsed_update.layout_splice {
+                                    state.splice_layout(layout_splice);
+                                } else if let Some(preserved_block_count) =
                                     parsed_update.preserved_block_count
                                 {
                                     state.splice_compatible_layout(
@@ -200,7 +207,7 @@ impl TextViewState {
             _parse_task,
             _receive_task,
         };
-        this.increment_update(&text, false, cx);
+        this.increment_update(&text, false, false, cx);
         this
     }
 
@@ -297,6 +304,25 @@ impl TextViewState {
 
     /// Set the text content.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.set_text_inner(text, false, cx);
+    }
+
+    /// Replace the text while preserving unchanged top-level blocks and the
+    /// logical viewport around the replaced block range.
+    ///
+    /// Use this for structural edits within the same document. Unlike
+    /// [`Self::set_text`], this updates the backing [`ListState`] with a splice
+    /// after parsing instead of allowing the renderer to reset the whole list.
+    pub fn set_text_preserving_layout(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.set_text_inner(text, true, cx);
+    }
+
+    fn set_text_inner(
+        &mut self,
+        text: &str,
+        preserve_layout: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.text.as_str() == text {
             return;
         }
@@ -304,7 +330,7 @@ impl TextViewState {
         self.text.clear();
         self.text.push_str(text);
         self.parsed_error = None;
-        self.increment_update(text, false, cx);
+        self.increment_update(text, false, preserve_layout, cx);
     }
 
     /// Append partial text content to the existing text.
@@ -313,7 +339,7 @@ impl TextViewState {
             return;
         }
         self.text.push_str(new_text);
-        self.increment_update(new_text, true, cx);
+        self.increment_update(new_text, true, false, cx);
     }
 
     pub(crate) fn set_markdown_extensions(
@@ -328,7 +354,7 @@ impl TextViewState {
         self.markdown_extensions = markdown_extensions;
         if self.format == TextViewFormat::Markdown {
             let text = self.text.clone();
-            self.increment_update(&text, false, cx);
+            self.increment_update(&text, false, false, cx);
         }
     }
 
@@ -383,12 +409,20 @@ impl TextViewState {
         self.parsed_content.document.selected_text(format, blocks)
     }
 
-    fn increment_update(&mut self, text: &str, append: bool, cx: &mut Context<Self>) {
+    fn increment_update(
+        &mut self,
+        text: &str,
+        append: bool,
+        preserve_layout: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.revision += 1;
         if !append {
             self.selection_revision = self.selection_revision.wrapping_add(1);
         }
         let parse_synchronously = !append && text.len() <= MAX_SYNC_FULL_REPLACE_BYTES;
+        let previous_document =
+            (preserve_layout || append).then(|| self.parsed_content.document.clone());
         let update_options = UpdateOptions {
             revision: self.revision,
             append,
@@ -401,6 +435,8 @@ impl TextViewState {
             },
             pending_text: text.to_string(),
             markdown_extensions: self.markdown_extensions.clone(),
+            preserve_layout,
+            previous_document,
         };
 
         // Keep small full replacements synchronous so their first layout has
@@ -409,6 +445,15 @@ impl TextViewState {
         if parse_synchronously {
             match parse_content(self.format, ParsedContent::default(), &update_options) {
                 Ok(content) => {
+                    if preserve_layout {
+                        self.splice_layout(replacement_layout_splice(
+                            update_options
+                                .previous_document
+                                .as_ref()
+                                .expect("preserving replacement has a previous document"),
+                            &content.document,
+                        ));
+                    }
                     self.parsed_content = content;
                     self.parsed_error = None;
                     if !self.is_selecting {
@@ -444,6 +489,14 @@ impl TextViewState {
         // `splice` keeps the prefix's measured sizes and marks only the new
         // suffix unmeasured. Re-arm `measure_all` so it fills that suffix and
         // retains an exact, stable scrollbar height.
+        self.list_state.clone().measure_all();
+    }
+
+    fn splice_layout(&mut self, splice: LayoutSplice) {
+        let old_len = self.list_state.item_count();
+        let start = splice.old_range.start.min(old_len);
+        let end = splice.old_range.end.min(old_len).max(start);
+        self.list_state.splice(start..end, splice.new_count);
         self.list_state.clone().measure_all();
     }
 
@@ -730,6 +783,17 @@ impl Future for UpdateFuture {
                             .map_or(0, |(_, preserved_block_count)| preserved_block_count)
                     });
                     let res = parse_content(self.format, self.content.clone(), &options);
+                    let layout_splice = options.preserve_layout.then(|| {
+                        res.as_ref().ok().map(|content| {
+                            replacement_layout_splice(
+                                options
+                                    .previous_document
+                                    .as_ref()
+                                    .expect("preserving replacement has a previous document"),
+                                &content.document,
+                            )
+                        })
+                    });
                     if let Ok(content) = &res {
                         self.content = content.clone();
                     }
@@ -738,6 +802,7 @@ impl Future for UpdateFuture {
                         full_parse: !options.append,
                         selection_compatible: options.mode == ParseMode::Compatible,
                         preserved_block_count,
+                        layout_splice: layout_splice.flatten(),
                         baseline_ack: options.mode == ParseMode::BaselineAck,
                         result: res,
                     });
@@ -761,6 +826,8 @@ struct UpdateOptions {
     append: bool,
     mode: ParseMode,
     markdown_extensions: Arc<MarkdownExtensions>,
+    preserve_layout: bool,
+    previous_document: Option<ParsedDocument>,
 }
 
 impl UpdateOptions {
@@ -768,6 +835,13 @@ impl UpdateOptions {
         if next.append {
             self.pending_text.push_str(&next.pending_text);
             self.revision = next.revision;
+            if self.preserve_layout {
+                // A synchronous preserving replacement may already have
+                // applied its splice on the UI thread. Compare the coalesced
+                // append against that current document, not the document from
+                // before the replacement, so the splice is not applied twice.
+                self.previous_document = next.previous_document;
+            }
             if self.mode != ParseMode::Replace {
                 self.mode = ParseMode::Compatible;
             }
@@ -782,6 +856,7 @@ struct ParsedUpdate {
     full_parse: bool,
     selection_compatible: bool,
     preserved_block_count: Option<usize>,
+    layout_splice: Option<LayoutSplice>,
     baseline_ack: bool,
     result: Result<ParsedContent, SharedString>,
 }
@@ -791,6 +866,12 @@ enum ParseMode {
     BaselineAck,
     Replace,
     Compatible,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LayoutSplice {
+    old_range: Range<usize>,
+    new_count: usize,
 }
 
 fn merge_pending_options(options: &mut UpdateOptions, rx: &Receiver<UpdateOptions>) -> bool {
@@ -876,11 +957,132 @@ fn append_reparse_range(document: &ParsedDocument) -> Option<(usize, usize)> {
     Some((start, preserved_block_count))
 }
 
+/// Find the smallest top-level block range that represents a full-document
+/// replacement. Blocks outside the range have identical source and can retain
+/// their cached measurements.
+fn replacement_layout_splice(
+    previous: &ParsedDocument,
+    replacement: &ParsedDocument,
+) -> LayoutSplice {
+    let previous_len = previous.blocks.len();
+    let replacement_len = replacement.blocks.len();
+    let shared_len = previous_len.min(replacement_len);
+
+    let prefix_len = (0..shared_len)
+        .take_while(|&ix| blocks_have_same_layout(previous, ix, replacement, ix, false))
+        .count();
+
+    let suffix_limit = (previous_len - prefix_len).min(replacement_len - prefix_len);
+    let suffix_len = (0..suffix_limit)
+        .take_while(|&offset| {
+            blocks_have_same_layout(
+                previous,
+                previous_len - offset - 1,
+                replacement,
+                replacement_len - offset - 1,
+                true,
+            )
+        })
+        .count();
+
+    LayoutSplice {
+        old_range: prefix_len..previous_len - suffix_len,
+        new_count: replacement_len - prefix_len - suffix_len,
+    }
+}
+
+fn blocks_have_same_layout(
+    left_document: &ParsedDocument,
+    left_ix: usize,
+    right_document: &ParsedDocument,
+    right_ix: usize,
+    shifted: bool,
+) -> bool {
+    let left = &left_document.blocks[left_ix];
+    let right = &right_document.blocks[right_ix];
+    if std::mem::discriminant(left) != std::mem::discriminant(right) {
+        return false;
+    }
+
+    // A virtual list item's presentation includes its position in the list.
+    // If preceding items changed, matching source alone does not make its
+    // cached layout reusable.
+    if shifted && matches!(left, node::BlockNode::VirtualListItem { .. }) {
+        return false;
+    }
+
+    let Some(left_span) = left.span() else {
+        return false;
+    };
+    let Some(right_span) = right.span() else {
+        return false;
+    };
+    left_document.source.get(left_span.start..left_span.end)
+        == right_document
+            .source
+            .get(right_span.start..right_span.end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::text::MarkdownNode;
-    use gpui::TestAppContext;
+    use gpui::{ListOffset, TestAppContext};
+
+    #[test]
+    fn replacement_layout_splice_preserves_unchanged_prefix_and_suffix() {
+        let parse = |source: &str| {
+            parse_content(
+                TextViewFormat::Markdown,
+                ParsedContent::default(),
+                &UpdateOptions {
+                    revision: 1,
+                    pending_text: source.into(),
+                    append: false,
+                    mode: ParseMode::Replace,
+                    markdown_extensions: Arc::default(),
+                    preserve_layout: false,
+                    previous_document: None,
+                },
+            )
+            .expect("parse markdown")
+            .document
+        };
+        let previous = parse("one\n\ntwo\n\nthree\n\nfour");
+        let replacement = parse("one\n\ntwo\n\ninserted\n\nthree\n\nfour");
+
+        assert_eq!(
+            replacement_layout_splice(&previous, &replacement),
+            LayoutSplice {
+                old_range: 2..2,
+                new_count: 1,
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn preserving_replacement_keeps_viewport_anchored_in_unchanged_suffix(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let previous = "one\n\ntwo\n\nthree\n\nfour";
+        let replacement = "one\n\ntwo\n\ninserted\n\nthree\n\nfour";
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(previous, cx)));
+
+        state.update(cx, |state, cx| {
+            state.list_state.reset(4);
+            state.list_state.scroll_to(ListOffset {
+                item_ix: 3,
+                offset_in_item: px(7.),
+            });
+            state.set_text_preserving_layout(replacement, cx);
+
+            assert_eq!(state.list_state.item_count(), 5);
+            let scroll_top = state.list_state.logical_scroll_top();
+            assert_eq!(scroll_top.item_ix, 4);
+            assert_eq!(scroll_top.offset_in_item, px(7.));
+        });
+    }
 
     #[test]
     fn append_reparses_a_virtualized_list_from_its_original_start() {
@@ -890,6 +1092,8 @@ mod tests {
             append: false,
             mode: ParseMode::Replace,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         };
         let content = parse_content(TextViewFormat::Markdown, ParsedContent::default(), &initial)
             .expect("initial list parse");
@@ -901,6 +1105,8 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         };
         let content =
             parse_content(TextViewFormat::Markdown, content, &append).expect("appended list parse");
@@ -926,6 +1132,8 @@ mod tests {
             append: false,
             mode: ParseMode::Replace,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         };
         let content = parse_content(TextViewFormat::Markdown, ParsedContent::default(), &initial)
             .expect("initial parse");
@@ -1064,6 +1272,8 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         };
 
         options.merge(UpdateOptions {
@@ -1072,6 +1282,8 @@ mod tests {
             append: false,
             mode: ParseMode::BaselineAck,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         });
         options.merge(UpdateOptions {
             revision: 3,
@@ -1079,6 +1291,8 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         });
 
         assert_eq!(options.revision, 3);
@@ -1094,6 +1308,8 @@ mod tests {
             append: false,
             mode: ParseMode::Replace,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         };
 
         options.merge(UpdateOptions {
@@ -1102,6 +1318,8 @@ mod tests {
             append: true,
             mode: ParseMode::Compatible,
             markdown_extensions: Arc::default(),
+            preserve_layout: false,
+            previous_document: None,
         });
 
         assert_eq!(options.revision, 2);
@@ -1127,6 +1345,8 @@ mod tests {
                     ParseMode::Compatible
                 },
                 markdown_extensions: Arc::default(),
+                preserve_layout: false,
+                previous_document: None,
             })
             .unwrap();
         }

@@ -7,7 +7,7 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, spinner::Spinner,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum ToolStatus {
     Running,
     Succeeded,
@@ -51,7 +51,7 @@ impl<T: SimpleTool> RenderOnce for SimpleToolElement<T> {
 pub(super) struct ToolFrame {
     icon: IconName,
     title: SharedString,
-    detail: Option<SharedString>,
+    detail: Option<(AnyElement, bool)>,
     status: ToolStatus,
     diff: Option<(usize, usize)>,
 }
@@ -66,7 +66,7 @@ impl ToolFrame {
         Self {
             icon,
             title,
-            detail,
+            detail: detail.map(|detail| (detail.into_any_element(), true)),
             status,
             diff: None,
         }
@@ -74,6 +74,11 @@ impl ToolFrame {
 
     pub(super) fn diff(mut self, additions: usize, deletions: usize) -> Self {
         self.diff = Some((additions, deletions));
+        self
+    }
+
+    pub(super) fn custom_detail(mut self, detail: impl IntoElement) -> Self {
+        self.detail = Some((detail.into_any_element(), false));
         self
     }
 }
@@ -121,26 +126,28 @@ impl RenderOnce for ToolFrame {
                             .text_color(theme.foreground)
                             .child(self.title),
                     )
-                    .when_some(self.detail, |this, detail| {
-                        this.child(
-                            div()
-                                .id("tool-detail")
-                                .max_h(px(176.))
-                                .min_w_0()
-                                .overflow_scrollbar()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.border.opacity(0.7))
-                                .bg(theme.background.opacity(0.58))
-                                .px_2()
-                                .py_1p5()
-                                .font_family(theme.mono_font_family.clone())
-                                .text_xs()
-                                .line_height(px(18.))
-                                .text_color(theme.muted_foreground)
-                                .whitespace_normal()
-                                .child(detail),
-                        )
+                    .when_some(self.detail, |this, (detail, scrollable)| {
+                        let detail = div()
+                            .id("tool-detail")
+                            .max_h(px(176.))
+                            .min_w_0()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border.opacity(0.7))
+                            .bg(theme.background.opacity(0.58))
+                            .px_2()
+                            .py_1p5()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_xs()
+                            .line_height(px(18.))
+                            .text_color(theme.muted_foreground)
+                            .whitespace_normal()
+                            .child(detail);
+                        this.child(if scrollable {
+                            detail.overflow_scrollbar().into_any_element()
+                        } else {
+                            detail.overflow_hidden().into_any_element()
+                        })
                     }),
             )
             .child(render_trailing(self.diff, self.status, cx))

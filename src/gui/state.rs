@@ -355,6 +355,25 @@ pub struct ChatState {
     pending_user_message: Option<PendingUserMessage>,
     message_states: HashMap<String, MessageState>,
     item_locations: HashMap<String, ThreadItemLocation>,
+    transcript_layout_revision: u64,
+    transcript_layout_all_revision: u64,
+    transcript_layout_targets: HashMap<TranscriptLayoutTarget, u64>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum TranscriptLayoutTarget {
+    Item(String),
+    Notice(String),
+    Approval(String),
+    InputRequest(String),
+    PendingUser(String),
+    TurnPlan(String),
+}
+
+pub(crate) struct TranscriptLayoutChanges {
+    pub revision: u64,
+    pub all: bool,
+    pub targets: Vec<TranscriptLayoutTarget>,
 }
 
 impl ChatState {
@@ -377,6 +396,9 @@ impl ChatState {
             pending_user_message: None,
             message_states: HashMap::new(),
             item_locations: HashMap::new(),
+            transcript_layout_revision: 0,
+            transcript_layout_all_revision: 0,
+            transcript_layout_targets: HashMap::new(),
         }
     }
 
@@ -396,7 +418,68 @@ impl ChatState {
             pending_user_message: None,
             message_states: HashMap::new(),
             item_locations,
+            transcript_layout_revision: 0,
+            transcript_layout_all_revision: 0,
+            transcript_layout_targets: HashMap::new(),
         }
+    }
+
+    pub(crate) fn transcript_layout_changes_since(&self, revision: u64) -> TranscriptLayoutChanges {
+        TranscriptLayoutChanges {
+            revision: self.transcript_layout_revision,
+            all: self.transcript_layout_all_revision > revision,
+            targets: self
+                .transcript_layout_targets
+                .iter()
+                .filter_map(|(target, changed_at)| {
+                    (*changed_at > revision).then_some(target.clone())
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn command_output(&self, item_id: &str) -> Option<&str> {
+        let location = *self.item_locations.get(item_id)?;
+        let item = self
+            .thread
+            .as_ref()?
+            .turns
+            .get(location.turn_index)?
+            .items
+            .get(location.item_index)?;
+        let ThreadItem::CommandExecution {
+            aggregated_output, ..
+        } = item
+        else {
+            return None;
+        };
+        aggregated_output.as_deref()
+    }
+
+    pub(crate) fn file_changes(&self, item_id: &str) -> Option<&[FileUpdateChange]> {
+        let location = *self.item_locations.get(item_id)?;
+        let item = self
+            .thread
+            .as_ref()?
+            .turns
+            .get(location.turn_index)?
+            .items
+            .get(location.item_index)?;
+        let ThreadItem::FileChange { changes, .. } = item else {
+            return None;
+        };
+        Some(changes)
+    }
+
+    fn mark_transcript_layout(&mut self, target: TranscriptLayoutTarget) {
+        self.transcript_layout_revision = self.transcript_layout_revision.wrapping_add(1);
+        self.transcript_layout_targets
+            .insert(target, self.transcript_layout_revision);
+    }
+
+    fn mark_all_transcript_layout(&mut self) {
+        self.transcript_layout_revision = self.transcript_layout_revision.wrapping_add(1);
+        self.transcript_layout_all_revision = self.transcript_layout_revision;
     }
 
     pub fn upsert_notice(&mut self, id: String, body: String) {
@@ -404,10 +487,11 @@ impl ChatState {
             notice.body = body.into();
         } else {
             self.notices.push(HistoryNotice {
-                id,
+                id: id.clone(),
                 body: body.into(),
             });
         }
+        self.mark_transcript_layout(TranscriptLayoutTarget::Notice(id));
     }
 
     pub fn remove_notice(&mut self, id: &str) {
@@ -415,6 +499,7 @@ impl ChatState {
     }
 
     pub fn upsert_approval(&mut self, approval: PendingApproval) {
+        let target = TranscriptLayoutTarget::Approval(approval.request_id.to_string());
         if let Some(existing) = self
             .pending_approvals
             .iter_mut()
@@ -424,6 +509,7 @@ impl ChatState {
         } else {
             self.pending_approvals.push(approval);
         }
+        self.mark_transcript_layout(target);
     }
 
     pub fn remove_approval(&mut self, request_id: &RequestId) {
@@ -432,6 +518,7 @@ impl ChatState {
     }
 
     pub fn upsert_input_request(&mut self, request: PendingUserInputRequest) {
+        let target = TranscriptLayoutTarget::InputRequest(request.request_id.to_string());
         if let Some(existing) = self
             .pending_inputs
             .iter_mut()
@@ -441,6 +528,7 @@ impl ChatState {
         } else {
             self.pending_inputs.push(request);
         }
+        self.mark_transcript_layout(target);
     }
 
     pub fn answer_input_request(
@@ -500,18 +588,20 @@ impl ChatState {
         plan: Vec<TurnPlanStep>,
     ) {
         self.turn_plans.insert(
-            turn_id,
+            turn_id.clone(),
             TurnPlanView {
                 explanation: explanation.map(Into::into),
                 steps: plan,
             },
         );
+        self.mark_transcript_layout(TranscriptLayoutTarget::TurnPlan(turn_id));
     }
 
     pub fn append_tool_progress(&mut self, item_id: &str, message: String) {
         let messages = self.tool_progress.entry(item_id.to_string()).or_default();
         if messages.last().is_none_or(|last| last.as_ref() != message) {
             messages.push(message.into());
+            self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
         }
     }
 
@@ -535,6 +625,7 @@ impl ChatState {
         self.thread = Some(thread);
         self.rebuild_item_locations();
         self.reconcile_pending_user_message();
+        self.mark_all_transcript_layout();
     }
 
     pub fn begin_user_message(&mut self, client_id: String, text: String) -> bool {
@@ -542,13 +633,14 @@ impl ChatState {
             return false;
         }
         self.pending_user_message = Some(PendingUserMessage {
-            client_id,
+            client_id: client_id.clone(),
             content: vec![UserInput::Text {
                 text,
                 text_elements: Vec::new(),
             }],
             delivery: PendingUserMessageDelivery::Sending,
         });
+        self.mark_transcript_layout(TranscriptLayoutTarget::PendingUser(client_id));
         true
     }
 
@@ -585,6 +677,7 @@ impl ChatState {
             return false;
         };
         message.delivery = PendingUserMessageDelivery::Failed(error.into());
+        self.mark_transcript_layout(TranscriptLayoutTarget::PendingUser(client_id.to_string()));
         true
     }
 
@@ -608,6 +701,7 @@ impl ChatState {
             thread.turns.push(turn);
         }
         self.rebuild_item_locations();
+        self.mark_all_transcript_layout();
     }
 
     pub fn complete_turn(&mut self, completed: Turn) {
@@ -642,14 +736,16 @@ impl ChatState {
             self.message_states.remove(&item_id);
         }
         self.rebuild_item_locations();
+        self.mark_all_transcript_layout();
     }
 
     pub fn start_item(&mut self, turn_id: &str, item: ThreadItem) {
         self.acknowledge_user_message_in(std::slice::from_ref(&item));
         let item_id = item.id().to_string();
         self.message_states
-            .insert(item_id, MessageState::streaming());
+            .insert(item_id.clone(), MessageState::streaming());
         self.upsert_thread_item(turn_id, item);
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id));
     }
 
     pub fn complete_item(&mut self, turn_id: &str, item: ThreadItem) {
@@ -659,6 +755,7 @@ impl ChatState {
         if let Some(state) = self.message_states.get_mut(&item_id) {
             state.lifecycle = MessageLifecycle::Complete;
         }
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id));
     }
 
     fn upsert_thread_item(&mut self, turn_id: &str, item: ThreadItem) {
@@ -709,6 +806,7 @@ impl ChatState {
             return;
         };
         text.push_str(delta);
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
     }
 
     pub fn append_reasoning_summary_delta(
@@ -725,6 +823,7 @@ impl ChatState {
         };
         summary.resize_with(summary_index + 1, String::new);
         summary[summary_index].push_str(delta);
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
     }
 
     pub fn add_reasoning_summary_part(&mut self, item_id: &str, summary_index: i64) {
@@ -735,6 +834,7 @@ impl ChatState {
             return;
         };
         summary.resize_with(summary_index + 1, String::new);
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
     }
 
     pub fn append_reasoning_content_delta(
@@ -751,6 +851,7 @@ impl ChatState {
         };
         content.resize_with(content_index + 1, String::new);
         content[content_index].push_str(delta);
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
     }
 
     pub fn append_command_output_delta(&mut self, item_id: &str, delta: &str) {
@@ -763,6 +864,7 @@ impl ChatState {
         aggregated_output
             .get_or_insert_with(String::new)
             .push_str(delta);
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
     }
 
     pub fn update_file_change_item(&mut self, item_id: &str, changes: Vec<FileUpdateChange>) {
@@ -773,6 +875,7 @@ impl ChatState {
             return;
         };
         *existing = changes;
+        self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
     }
 
     pub fn append_file_change_output_delta(&mut self, item_id: &str, delta: &str) {
@@ -781,6 +884,7 @@ impl ChatState {
         };
         if let Some(last_change) = changes.last_mut() {
             last_change.diff.push_str(delta);
+            self.mark_transcript_layout(TranscriptLayoutTarget::Item(item_id.to_string()));
         }
     }
 

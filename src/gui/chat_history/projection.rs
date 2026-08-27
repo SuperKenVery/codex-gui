@@ -2,8 +2,9 @@ use std::{collections::HashSet, time::Duration};
 
 use codex_app_server_protocol::{ThreadItem, Turn, TurnPlanStepStatus, TurnStatus, UserInput};
 use codex_protocol::models::MessagePhase;
+use gpui::WeakEntity;
 
-use crate::gui::{ChatState, PendingUserMessageDelivery};
+use crate::gui::{ChatState, PendingUserMessageDelivery, state::TranscriptLayoutTarget};
 
 use super::{
     blocks::{HistoryBlock, UserMessageDelivery, is_tool_item, tool_calls, tools_done},
@@ -12,6 +13,7 @@ use super::{
 
 pub(super) fn build_transcript(
     chat: &ChatState,
+    chat_source: WeakEntity<ChatState>,
     expanded_turns: &HashSet<String>,
     expanded_tool_groups: &HashSet<String>,
 ) -> TranscriptSnapshot {
@@ -23,6 +25,7 @@ pub(super) fn build_transcript(
             append_turn(
                 &mut transcript,
                 chat,
+                &chat_source,
                 turn,
                 previous_turn_id.as_deref(),
                 expanded_turns,
@@ -55,6 +58,10 @@ pub(super) fn build_transcript(
                         .iter()
                         .any(|step| matches!(step.status, TurnPlanStepStatus::InProgress)),
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::TurnPlan(turn.id.clone()),
+                    super::blocks::BlockId::new("plan", &format!("turn-plan-{}", turn.id)),
+                );
             }
             previous_turn_id = Some(turn.id.as_str());
         }
@@ -74,6 +81,10 @@ pub(super) fn build_transcript(
                 body: body.into(),
                 delivery,
             });
+            transcript.map_layout_target(
+                TranscriptLayoutTarget::PendingUser(message.client_id.clone()),
+                super::blocks::BlockId::new("user", &message.client_id),
+            );
         }
     }
 
@@ -82,18 +93,30 @@ pub(super) fn build_transcript(
             key: notice.id.clone(),
             body: notice.body.clone(),
         });
+        transcript.map_layout_target(
+            TranscriptLayoutTarget::Notice(notice.id.clone()),
+            super::blocks::BlockId::new("notice", &notice.id),
+        );
     }
 
     for approval in &chat.pending_approvals {
         transcript.push_block(HistoryBlock::Approval {
             approval: approval.clone(),
         });
+        transcript.map_layout_target(
+            TranscriptLayoutTarget::Approval(approval.request_id.to_string()),
+            super::blocks::BlockId::new("approval", &approval.request_id.to_string()),
+        );
     }
 
     for request in &chat.pending_inputs {
         transcript.push_block(HistoryBlock::InputRequest {
             request: request.clone(),
         });
+        transcript.map_layout_target(
+            TranscriptLayoutTarget::InputRequest(request.request_id.to_string()),
+            super::blocks::BlockId::new("input-request", &request.request_id.to_string()),
+        );
     }
 
     transcript
@@ -102,6 +125,7 @@ pub(super) fn build_transcript(
 fn append_turn(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
+    chat_source: &WeakEntity<ChatState>,
     turn: &Turn,
     previous_turn_id: Option<&str>,
     expanded_turns: &HashSet<String>,
@@ -111,6 +135,7 @@ fn append_turn(
         append_items(
             transcript,
             chat,
+            chat_source,
             &turn.id,
             previous_turn_id,
             &turn.items,
@@ -122,6 +147,7 @@ fn append_turn(
     append_items(
         transcript,
         chat,
+        chat_source,
         &turn.id,
         previous_turn_id,
         &turn.items[..=fold.user_index],
@@ -139,6 +165,7 @@ fn append_turn(
         append_items(
             transcript,
             chat,
+            chat_source,
             &turn.id,
             previous_turn_id,
             &turn.items[fold.user_index + 1..],
@@ -148,6 +175,7 @@ fn append_turn(
         append_agent(
             transcript,
             chat,
+            chat_source,
             final_answer,
             &[],
             false,
@@ -159,6 +187,7 @@ fn append_turn(
 fn append_items(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
+    chat_source: &WeakEntity<ChatState>,
     turn_id: &str,
     previous_turn_id: Option<&str>,
     items: &[ThreadItem],
@@ -181,6 +210,10 @@ fn append_items(
                         body: body.into(),
                         delivery: UserMessageDelivery::Sent,
                     });
+                    transcript.map_layout_target(
+                        TranscriptLayoutTarget::Item(id.clone()),
+                        super::blocks::BlockId::new("user", client_id.as_deref().unwrap_or(id)),
+                    );
                 }
                 index += 1;
             }
@@ -193,6 +226,7 @@ fn append_items(
                 append_agent(
                     transcript,
                     chat,
+                    chat_source,
                     &items[index],
                     &tools,
                     tools_end == items.len(),
@@ -206,6 +240,10 @@ fn append_items(
                     body: text.clone().into(),
                     running: chat.item_is_streaming(id),
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::Item(id.clone()),
+                    super::blocks::BlockId::new("plan", id),
+                );
                 index += 1;
             }
             ThreadItem::Reasoning {
@@ -238,6 +276,10 @@ fn append_items(
                         body: body.into(),
                         running,
                     });
+                    transcript.map_layout_target(
+                        TranscriptLayoutTarget::Item(id.clone()),
+                        super::blocks::BlockId::new("reasoning", id),
+                    );
                 }
                 index += 1;
             }
@@ -251,6 +293,10 @@ fn append_items(
                         .join("\n")
                         .into(),
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::Item(id.clone()),
+                    super::blocks::BlockId::new("hook-prompt", id),
+                );
                 index += 1;
             }
             ThreadItem::SubAgentActivity {
@@ -265,6 +311,10 @@ fn append_items(
                     body: agent_path.clone().into(),
                     running: false,
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::Item(id.clone()),
+                    super::blocks::BlockId::new("activity", id),
+                );
                 index += 1;
             }
             ThreadItem::EnteredReviewMode { id, review } => {
@@ -274,6 +324,10 @@ fn append_items(
                     body: review.clone().into(),
                     running: false,
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::Item(id.clone()),
+                    super::blocks::BlockId::new("activity", id),
+                );
                 index += 1;
             }
             ThreadItem::ExitedReviewMode { id, review } => {
@@ -283,6 +337,10 @@ fn append_items(
                     body: review.clone().into(),
                     running: false,
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::Item(id.clone()),
+                    super::blocks::BlockId::new("activity", id),
+                );
                 index += 1;
             }
             ThreadItem::ContextCompaction { id } => {
@@ -292,6 +350,10 @@ fn append_items(
                     body: "Older conversation context was summarized to continue working.".into(),
                     running: false,
                 });
+                transcript.map_layout_target(
+                    TranscriptLayoutTarget::Item(id.clone()),
+                    super::blocks::BlockId::new("activity", id),
+                );
                 index += 1;
             }
             item if is_tool_item(item) => {
@@ -303,6 +365,7 @@ fn append_items(
                 append_tool_group(
                     transcript,
                     chat,
+                    chat_source,
                     item.id(),
                     &tools,
                     tools_end == items.len()
@@ -319,6 +382,7 @@ fn append_items(
 fn append_agent(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
+    chat_source: &WeakEntity<ChatState>,
     item: &ThreadItem,
     tools: &[&ThreadItem],
     tool_group_at_tail: bool,
@@ -341,6 +405,10 @@ fn append_agent(
             key: id.clone(),
             label,
         });
+        transcript.map_layout_target(
+            TranscriptLayoutTarget::Item(id.clone()),
+            super::blocks::BlockId::new("assistant-header", id),
+        );
     }
     transcript.push_markdown(text);
 
@@ -348,6 +416,7 @@ fn append_agent(
         append_tool_group(
             transcript,
             chat,
+            chat_source,
             id,
             tools,
             tool_group_at_tail && !tools_done(tools, |id| chat.item_is_streaming(id)),
@@ -359,18 +428,28 @@ fn append_agent(
 fn append_tool_group(
     transcript: &mut TranscriptSnapshot,
     chat: &ChatState,
+    chat_source: &WeakEntity<ChatState>,
     key: &str,
     tools: &[&ThreadItem],
     active_tail: bool,
     expanded_tool_groups: &HashSet<String>,
 ) {
+    let block_id = super::blocks::BlockId::tool_group(key);
     transcript.push_block(HistoryBlock::ToolGroup {
         key: key.to_string(),
-        tools: tool_calls(tools, &chat.tool_progress, |id| chat.item_is_streaming(id)),
+        tools: tool_calls(tools, &chat.tool_progress, chat_source.clone(), |id| {
+            chat.item_is_streaming(id)
+        }),
         expanded: expanded_tool_groups.contains(key),
         collapsible: true,
         active_tail,
     });
+    for tool in tools {
+        transcript.map_layout_target(
+            TranscriptLayoutTarget::Item(tool.id().to_string()),
+            block_id.clone(),
+        );
+    }
 }
 
 fn tool_group_end(

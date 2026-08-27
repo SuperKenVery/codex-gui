@@ -36,6 +36,7 @@ pub struct ChatHistory {
     transcript_blocks: TranscriptBlockStore,
     transcript_markdown: String,
     transcript_chat_id: Option<String>,
+    transcript_layout_revision: u64,
     send_animation: Option<SendAnimationLaunch>,
 }
 
@@ -94,6 +95,7 @@ impl ChatHistory {
             transcript_blocks,
             transcript_markdown: String::new(),
             transcript_chat_id: None,
+            transcript_layout_revision: 0,
             send_animation: None,
         };
         history.rebuild_transcript(cx);
@@ -124,6 +126,7 @@ impl ChatHistory {
         self.transcript = new_transcript(cx);
         self.transcript_markdown.clear();
         self.transcript_chat_id = None;
+        self.transcript_layout_revision = 0;
         self.rebuild_transcript(cx);
     }
 
@@ -265,23 +268,50 @@ impl ChatHistory {
         cx: &mut Context<Self>,
     ) {
         let Some(chat) = self.active_chat.as_ref() else {
-            self.sync_transcript(None, TranscriptSnapshot::new(), changed_block, cx);
+            self.sync_transcript(
+                None,
+                TranscriptSnapshot::new(),
+                false,
+                changed_block.into_iter().collect(),
+                cx,
+            );
             return;
         };
-        let chat_id = chat.read(cx).id.clone();
-        let snapshot = build_transcript(
-            chat.read(cx),
-            &self.expanded_turns,
-            &self.expanded_tool_groups,
+        let chat_source = chat.downgrade();
+        let (chat_id, snapshot, layout_changes) = chat.read_with(cx, |chat, _| {
+            (
+                chat.id.clone(),
+                build_transcript(
+                    chat,
+                    chat_source,
+                    &self.expanded_turns,
+                    &self.expanded_tool_groups,
+                ),
+                chat.transcript_layout_changes_since(self.transcript_layout_revision),
+            )
+        });
+        self.transcript_layout_revision = layout_changes.revision;
+        let mut changed_blocks = layout_changes
+            .targets
+            .into_iter()
+            .filter_map(|target| snapshot.layout_targets.get(&target).cloned())
+            .collect::<HashSet<_>>();
+        changed_blocks.extend(changed_block);
+        self.sync_transcript(
+            Some(chat_id),
+            snapshot,
+            layout_changes.all,
+            changed_blocks,
+            cx,
         );
-        self.sync_transcript(Some(chat_id), snapshot, changed_block, cx);
     }
 
     fn sync_transcript(
         &mut self,
         chat_id: Option<String>,
         snapshot: TranscriptSnapshot,
-        changed_block: Option<BlockId>,
+        remeasure_all: bool,
+        changed_blocks: HashSet<BlockId>,
         cx: &mut Context<Self>,
     ) {
         if let Ok(mut blocks) = self.transcript_blocks.write() {
@@ -297,11 +327,12 @@ impl ChatHistory {
             // Markdown marker. Invalidate their cached measurements without resetting
             // ListState, so expanding a tool group keeps the current viewport.
             self.transcript.update(cx, |state, cx| {
-                let remeasured = changed_block.as_ref().is_some_and(|id| {
-                    state.remeasure_custom_block(|node| node_has_id(node, id), cx)
-                });
-                if !remeasured {
+                if remeasure_all {
                     state.remeasure_content(cx);
+                    return;
+                }
+                for id in &changed_blocks {
+                    state.remeasure_custom_block(|node| node_has_id(node, id), cx);
                 }
             });
             return;
@@ -318,6 +349,15 @@ impl ChatHistory {
         self.transcript.update(cx, |state, cx| {
             if let Some(delta) = appended {
                 state.push_str(&delta, cx);
+            } else if same_chat {
+                state.set_text_preserving_layout(&markdown, cx);
+                if remeasure_all {
+                    state.remeasure_content(cx);
+                } else {
+                    for id in &changed_blocks {
+                        state.remeasure_custom_block(|node| node_has_id(node, id), cx);
+                    }
+                }
             } else {
                 state.set_text(&markdown, cx);
             }

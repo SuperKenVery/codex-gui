@@ -12,6 +12,7 @@ use super::{
     blocks::{self, BlockId, HistoryBlock},
     view::ChatHistory,
 };
+use crate::gui::state::TranscriptLayoutTarget;
 
 const BLOCK_TAG: &str = "CodexTranscriptBlock";
 
@@ -20,6 +21,7 @@ pub(super) type TranscriptBlockStore = Arc<RwLock<HashMap<BlockId, HistoryBlock>
 pub(super) struct TranscriptSnapshot {
     pub markdown: String,
     pub blocks: HashMap<BlockId, HistoryBlock>,
+    pub layout_targets: HashMap<TranscriptLayoutTarget, BlockId>,
 }
 
 impl TranscriptSnapshot {
@@ -27,6 +29,7 @@ impl TranscriptSnapshot {
         Self {
             markdown: String::new(),
             blocks: HashMap::new(),
+            layout_targets: HashMap::new(),
         }
     }
 
@@ -44,6 +47,10 @@ impl TranscriptSnapshot {
         self.markdown
             .push_str(&format!(r#"<{BLOCK_TAG} id="{id}" />"#));
         self.blocks.insert(id, block);
+    }
+
+    pub fn map_layout_target(&mut self, target: TranscriptLayoutTarget, id: BlockId) {
+        self.layout_targets.insert(target, id);
     }
 
     fn push_separator(&mut self) {

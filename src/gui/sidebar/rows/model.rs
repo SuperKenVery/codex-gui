@@ -131,16 +131,15 @@ impl SidebarRowDisplayStatus {
     }
 
     pub fn active_project_row(&self) -> Option<usize> {
-        (self.project_count > 0 && self.active_project < self.visible_project_count)
-            .then(|| {
-                let preceding_child_count = [&self.expanded_project, &self.departing_project]
-                    .into_iter()
-                    .filter_map(Option::as_ref)
-                    .filter(|expanded| expanded.project_index < self.active_project)
-                    .map(ExpandedProject::child_count)
-                    .sum::<usize>();
-                1 + self.active_project + preceding_child_count
-            })
+        (self.project_count > 0 && self.active_project < self.visible_project_count).then(|| {
+            let preceding_child_count = [&self.expanded_project, &self.departing_project]
+                .into_iter()
+                .filter_map(Option::as_ref)
+                .filter(|expanded| expanded.project_index < self.active_project)
+                .map(ExpandedProject::child_count)
+                .sum::<usize>();
+            1 + self.active_project + preceding_child_count
+        })
     }
 
     pub fn expanded_project_path(&self) -> Option<&str> {
