@@ -4,7 +4,7 @@ use codex_app_server_protocol::{
     CommandExecutionApprovalDecision, CommandExecutionRequestApprovalResponse,
     FileChangeApprovalDecision, FileChangeRequestApprovalResponse, FileUpdateChange,
     GrantedPermissionProfile, McpServerElicitationAction, McpServerElicitationRequestResponse,
-    PermissionGrantScope, PermissionsRequestApprovalResponse, RequestId, Thread, ThreadItem,
+    ApprovalsReviewer, PermissionGrantScope, PermissionsRequestApprovalResponse, RequestId, Thread, ThreadItem,
     ThreadStatus, ToolRequestUserInputAnswer, ToolRequestUserInputQuestion,
     ToolRequestUserInputResponse, Turn, TurnPlanStep, TurnStatus, UserInput,
 };
@@ -164,7 +164,7 @@ impl GuiState {
         self.chat_settings.permission_profile = permission_profile;
     }
 
-    pub fn set_approvals_reviewer(&mut self, approvals_reviewer: ApprovalReviewerMode) {
+    pub fn set_approvals_reviewer(&mut self, approvals_reviewer: ApprovalsReviewer) {
         self.chat_settings.approvals_reviewer = approvals_reviewer;
     }
 
@@ -189,7 +189,7 @@ pub struct ChatSettings {
     pub model: String,
     pub effort: String,
     pub permission_profile: String,
-    pub approvals_reviewer: ApprovalReviewerMode,
+    pub approvals_reviewer: ApprovalsReviewer,
 }
 
 impl Default for ChatSettings {
@@ -198,7 +198,7 @@ impl Default for ChatSettings {
             model: "gpt-5.5".into(),
             effort: "medium".into(),
             permission_profile: PermissionMode::WorkspaceWrite.profile_id().into(),
-            approvals_reviewer: ApprovalReviewerMode::User,
+            approvals_reviewer: ApprovalsReviewer::User,
         }
     }
 }
@@ -267,18 +267,10 @@ fn default_permission_profiles() -> Vec<PermissionProfileOption> {
     .collect()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ApprovalReviewerMode {
-    User,
-    AutoReview,
-}
-
-impl ApprovalReviewerMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::User => "Ask me",
-            Self::AutoReview => "Approve for me",
-        }
+pub fn approvals_reviewer_label(reviewer: ApprovalsReviewer) -> &'static str {
+    match reviewer {
+        ApprovalsReviewer::User => "Ask me",
+        ApprovalsReviewer::AutoReview => "Approve for me",
     }
 }
 

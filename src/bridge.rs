@@ -1,5 +1,5 @@
 use crate::gui::{
-    ApprovalReviewerMode, ChatSettings, ModelOption, PermissionMode, PermissionProfileOption,
+    ChatSettings, ModelOption, PermissionMode, PermissionProfileOption,
     permission_profile_label,
 };
 use codex_app_server_client::{
@@ -8,14 +8,16 @@ use codex_app_server_client::{
     InProcessServerEvent, TypedRequestError, legacy_core::config::Config,
 };
 use codex_app_server_protocol::{
-    ApprovalsReviewer, AskForApproval, ClientRequest, ConfigWarningNotification, JSONRPCErrorError,
-    ModelListParams, ModelListResponse, PermissionProfileListParams, PermissionProfileListResponse,
-    RequestId, ServerNotification, ServerRequest, SortDirection, Thread, ThreadDeleteParams,
-    ThreadDeleteResponse, ThreadForkParams, ThreadForkResponse, ThreadListParams,
-    ThreadListResponse, ThreadResumeParams, ThreadResumeResponse, ThreadSettingsUpdateParams,
-    ThreadSettingsUpdateResponse, ThreadSortKey, ThreadSource, ThreadStartParams,
-    ThreadStartResponse, TurnInterruptParams, TurnInterruptResponse, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, TurnSteerResponse, UserInput,
+    ApprovalsReviewer, AskForApproval, ClientRequest, ConfigBatchWriteParams, ConfigEdit,
+    ConfigReadParams, ConfigReadResponse, ConfigWarningNotification, ConfigWriteResponse,
+    JSONRPCErrorError, MergeStrategy, ModelListParams, ModelListResponse,
+    PermissionProfileListParams, PermissionProfileListResponse, RequestId, ServerNotification,
+    ServerRequest, SortDirection, Thread, ThreadDeleteParams, ThreadDeleteResponse,
+    ThreadForkParams, ThreadForkResponse, ThreadListParams, ThreadListResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadSettingsUpdateParams, ThreadSettingsUpdateResponse, ThreadSortKey,
+    ThreadSource, ThreadStartParams, ThreadStartResponse, TurnInterruptParams,
+    TurnInterruptResponse, TurnStartParams, TurnStartResponse, TurnSteerParams, TurnSteerResponse,
+    UserInput,
 };
 use codex_arg0::Arg0DispatchPaths;
 use codex_protocol::{openai_models::ReasoningEffort, protocol::SessionSource};
@@ -110,6 +112,13 @@ impl fmt::Display for BridgeError {
 impl std::error::Error for BridgeError {}
 
 type BridgeResult<T> = Result<T, BridgeError>;
+
+#[derive(Clone, Debug, Default)]
+pub struct PersistedChatSettings {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+}
 
 pub fn start_app_server_bridge(
     runtime: Handle,
@@ -280,6 +289,57 @@ impl AppServerBridge {
             .collect())
     }
 
+    pub async fn read_chat_settings(&self) -> BridgeResult<PersistedChatSettings> {
+        let response: ConfigReadResponse = self
+            .request(|request_id| ClientRequest::ConfigRead {
+                request_id,
+                params: ConfigReadParams {
+                    include_layers: false,
+                    cwd: None,
+                },
+            })
+            .await?;
+        Ok(PersistedChatSettings {
+            model: response.config.model,
+            effort: response
+                .config
+                .model_reasoning_effort
+                .map(|effort| effort.to_string()),
+            approvals_reviewer: response.config.approvals_reviewer,
+        })
+    }
+
+    pub async fn write_chat_settings(&self, settings: ChatSettings) -> BridgeResult<()> {
+        let _: ConfigWriteResponse = self
+            .request(|request_id| ClientRequest::ConfigBatchWrite {
+                request_id,
+                params: ConfigBatchWriteParams {
+                    edits: vec![
+                        ConfigEdit {
+                            key_path: "model".into(),
+                            value: serde_json::json!(settings.model),
+                            merge_strategy: MergeStrategy::Replace,
+                        },
+                        ConfigEdit {
+                            key_path: "model_reasoning_effort".into(),
+                            value: serde_json::json!(settings.effort),
+                            merge_strategy: MergeStrategy::Replace,
+                        },
+                        ConfigEdit {
+                            key_path: "approvals_reviewer".into(),
+                            value: serde_json::json!(settings.approvals_reviewer),
+                            merge_strategy: MergeStrategy::Replace,
+                        },
+                    ],
+                    file_path: None,
+                    expected_version: None,
+                    reload_user_config: false,
+                },
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_permission_profiles(
         &self,
         cwd: String,
@@ -313,7 +373,7 @@ impl AppServerBridge {
                     cwd: Some(cwd),
                     model: Some(settings.model.clone()),
                     approval_policy: Some(approval_policy_for(&settings)),
-                    approvals_reviewer: Some(approvals_reviewer_for(&settings)),
+                    approvals_reviewer: Some(settings.approvals_reviewer),
                     permissions: Some(settings.permission_profile.clone()),
                     sandbox: None,
                     thread_source: Some(ThreadSource::User),
@@ -389,7 +449,7 @@ impl AppServerBridge {
                 cwd: None,
                 runtime_workspace_roots: None,
                 approval_policy: Some(approval_policy_for(&settings)),
-                approvals_reviewer: Some(approvals_reviewer_for(&settings)),
+                approvals_reviewer: Some(settings.approvals_reviewer),
                 sandbox_policy: None,
                 permissions: Some(settings.permission_profile.clone()),
                 model: Some(settings.model.clone()),
@@ -450,7 +510,7 @@ impl AppServerBridge {
                 params: ThreadSettingsUpdateParams {
                     thread_id,
                     approval_policy: Some(approval_policy_for(&settings)),
-                    approvals_reviewer: Some(approvals_reviewer_for(&settings)),
+                    approvals_reviewer: Some(settings.approvals_reviewer),
                     permissions: Some(settings.permission_profile.clone()),
                     model: Some(settings.model.clone()),
                     effort: Some(reasoning_effort_for(&settings)),
@@ -665,9 +725,3 @@ fn reasoning_effort_for(settings: &ChatSettings) -> ReasoningEffort {
         .unwrap_or_else(|_| ReasoningEffort::Medium)
 }
 
-fn approvals_reviewer_for(settings: &ChatSettings) -> ApprovalsReviewer {
-    match settings.approvals_reviewer {
-        ApprovalReviewerMode::User => ApprovalsReviewer::User,
-        ApprovalReviewerMode::AutoReview => ApprovalsReviewer::AutoReview,
-    }
-}

@@ -178,12 +178,15 @@ impl CodexGui {
                 );
             }
             ServerNotification::GuardianWarning(params) => {
-                self.apply_targeted_notice(
-                    Some(&params.thread_id),
-                    &format!("guardian-warning-{}", uuid::Uuid::new_v4()),
-                    params.message,
-                    cx,
-                );
+                // Normally it's auto approve success
+                // We don't want to display this
+
+                // self.apply_targeted_notice(
+                //     Some(&params.thread_id),
+                //     &format!("guardian-warning-{}", uuid::Uuid::new_v4()),
+                //     params.message,
+                //     cx,
+                // );
             }
             ServerNotification::ConfigWarning(params) => {
                 let body = params

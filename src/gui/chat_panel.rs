@@ -1,7 +1,7 @@
 use crate::app::CodexGui;
 use crate::gui::{
-    ApprovalReviewerMode, ChatHistory, ChatHistoryEvent, GuiState, UiState,
-    new_client_user_message_id,
+    ApprovalsReviewer, ChatHistory, ChatHistoryEvent, GuiState, UiState,
+    approvals_reviewer_label, new_client_user_message_id,
 };
 use gpui::{
     Context, Entity, IntoElement, MouseButton, ParentElement, Render, Styled, Subscription,
@@ -467,7 +467,7 @@ impl ChatPanel {
                                     .ghost()
                                     .text_color(cx.theme().muted_foreground)
                                     .icon(IconName::Check)
-                                    .label(settings.approvals_reviewer.label())
+                                    .label(approvals_reviewer_label(settings.approvals_reviewer))
                                     .tooltip("Permission settings")
                                     .dropdown_menu({
                                         let parent = self.parent.clone();
@@ -502,12 +502,12 @@ impl ChatPanel {
                                                 .separator()
                                                 .item(PopupMenuItem::label("Approvals"));
                                             for reviewer in [
-                                                ApprovalReviewerMode::User,
-                                                ApprovalReviewerMode::AutoReview,
+                                                ApprovalsReviewer::User,
+                                                ApprovalsReviewer::AutoReview,
                                             ] {
                                                 let parent = parent.clone();
                                                 menu = menu.item(
-                                                    PopupMenuItem::new(reviewer.label())
+                                                    PopupMenuItem::new(approvals_reviewer_label(reviewer))
                                                         .checked(
                                                             settings.approvals_reviewer == reviewer,
                                                         )

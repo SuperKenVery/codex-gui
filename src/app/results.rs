@@ -5,8 +5,8 @@ use super::{
     thread_mapping::{chat_entity_from_thread, empty_chat_entity},
 };
 use crate::{
-    bridge::BridgeError,
-    global_state::{CodexGlobalState, LastSelectedModel},
+    bridge::{BridgeError, PersistedChatSettings},
+    global_state::CodexGlobalState,
     gui::{ChatState, ModelOption, PermissionProfileOption, ProjectState},
 };
 use codex_app_server_protocol::Thread;
@@ -155,22 +155,36 @@ impl CodexGui {
     pub(super) fn apply_models_result(
         &mut self,
         result: Result<Vec<ModelOption>, BridgeError>,
+        settings_result: Result<PersistedChatSettings, BridgeError>,
         cx: &mut Context<Self>,
     ) {
+        let persisted_settings = match settings_result {
+            Ok(settings) => Some(settings),
+            Err(error) => {
+                self.apply_bridge_error(error.to_string(), cx);
+                None
+            }
+        };
         match result {
             Ok(models) => {
-                let last_selected_model = last_selected_model();
                 self.state.update(cx, |state, cx| {
                     state.set_available_models(models);
-                    if let Some(selection) = last_selected_model
-                        && let Some(model) =
-                            resolve_model_id(&selection.slug, &state.available_models)
-                    {
-                        state.set_model(model.clone());
-                        if let Some(thinking_effort) = selection.thinking_effort
+                    if let Some(settings) = persisted_settings {
+                        if let Some(reviewer) = settings.approvals_reviewer {
+                            state.set_approvals_reviewer(reviewer);
+                        }
+                        if let Some(model) = settings.model.filter(|model| {
+                            state
+                                .available_models
+                                .iter()
+                                .any(|option| option.id == *model)
+                        }) {
+                            state.set_model(model);
+                        }
+                        if let Some(effort) = settings.effort
                             && let Some(effort) = resolve_reasoning_effort(
-                                &thinking_effort,
-                                &model,
+                                &effort,
+                                &state.chat_settings.model,
                                 &state.available_models,
                             )
                         {
@@ -315,45 +329,11 @@ fn projectless_thread_ids() -> HashSet<String> {
         })
 }
 
-fn last_selected_model() -> Option<LastSelectedModel> {
-    CodexGlobalState::load()
-        .map(|state| state.last_selected_model())
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "failed to load last selected model");
-            None
-        })
-}
-
-fn resolve_model_id(slug: &str, models: &[ModelOption]) -> Option<String> {
-    if models.iter().any(|model| model.id == slug) {
-        return Some(slug.to_owned());
-    }
-
-    let family = slug
-        .strip_suffix("-thinking")
-        .or_else(|| slug.strip_suffix("-pro"))
-        .unwrap_or(slug);
-    let version = family.strip_prefix("gpt-").and_then(|version| {
-        let (major, minor) = version.split_once('-')?;
-        (!major.is_empty() && !minor.is_empty() && !minor.contains('-'))
-            .then(|| format!("gpt-{major}.{minor}"))
-    })?;
-
-    [version.clone(), format!("{version}-sol")]
-        .into_iter()
-        .find(|candidate| models.iter().any(|model| model.id == *candidate))
-}
-
 fn resolve_reasoning_effort(
-    thinking_effort: &str,
+    effort: &str,
     model_id: &str,
     models: &[ModelOption],
 ) -> Option<String> {
-    let effort = match thinking_effort {
-        "standard" => "medium",
-        "extended" => "high",
-        effort => effort,
-    };
     models
         .iter()
         .find(|model| model.id == model_id)?
@@ -361,30 +341,4 @@ fn resolve_reasoning_effort(
         .iter()
         .any(|supported| supported == effort)
         .then(|| effort.to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_desktop_model_and_effort_to_available_codex_options() {
-        let models = vec![ModelOption {
-            id: "gpt-5.6-sol".to_string(),
-            display_name: "GPT-5.6-Sol".to_string(),
-            supported_efforts: vec![
-                "medium".to_string(),
-                "high".to_string(),
-                "xhigh".to_string(),
-            ],
-            default_effort: "medium".to_string(),
-        }];
-
-        let model = resolve_model_id("gpt-5-6-thinking", &models).unwrap();
-        assert_eq!(model, "gpt-5.6-sol");
-        assert_eq!(
-            resolve_reasoning_effort("extended", &model, &models).as_deref(),
-            Some("high")
-        );
-    }
 }

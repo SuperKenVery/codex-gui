@@ -21,39 +21,6 @@ pub(crate) struct CodexGlobalState {
         skip_serializing_if = "Vec::is_empty"
     )]
     projectless_thread_ids: Vec<String>,
-    #[serde(
-        default,
-        rename = "electron-persisted-atom-state",
-        skip_serializing_if = "Option::is_none"
-    )]
-    persisted_atom_state: Option<PersistedAtomState>,
-    #[serde(flatten)]
-    other: Map<String, Value>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct PersistedAtomState {
-    #[serde(
-        default,
-        rename = "chatgpt-last-selected-model-v1",
-        skip_serializing_if = "Option::is_none"
-    )]
-    last_selected_model: Option<LastSelectedModel>,
-    #[serde(flatten)]
-    other: Map<String, Value>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct LastSelectedModel {
-    pub(crate) slug: String,
-    #[serde(
-        default,
-        rename = "thinkingEffort",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub(crate) thinking_effort: Option<String>,
-    #[serde(default, rename = "versionId", skip_serializing_if = "Option::is_none")]
-    version_id: Option<String>,
     #[serde(flatten)]
     other: Map<String, Value>,
 }
@@ -66,32 +33,6 @@ impl CodexGlobalState {
 
     pub(crate) fn projectless_thread_ids(&self) -> HashSet<String> {
         self.projectless_thread_ids.iter().cloned().collect()
-    }
-
-    pub(crate) fn last_selected_model(&self) -> Option<LastSelectedModel> {
-        self.persisted_atom_state
-            .as_ref()?
-            .last_selected_model
-            .clone()
-    }
-
-    pub(crate) fn update_last_selected_model(model: &str, effort: &str) -> Result<()> {
-        Self::update(|state| {
-            let atoms = state
-                .persisted_atom_state
-                .get_or_insert_with(PersistedAtomState::default);
-            let selection = atoms
-                .last_selected_model
-                .get_or_insert_with(|| LastSelectedModel {
-                    slug: String::new(),
-                    thinking_effort: None,
-                    version_id: Some("latest".into()),
-                    other: Map::new(),
-                });
-            selection.slug = desktop_model_slug(model);
-            selection.thinking_effort = Some(desktop_thinking_effort(effort).into());
-            selection.version_id.get_or_insert_with(|| "latest".into());
-        })
     }
 
     pub(crate) fn add_projectless_thread(thread_id: &str) -> Result<()> {
@@ -157,29 +98,6 @@ impl CodexGlobalState {
         atomic_write(path, contents.as_bytes())?;
         atomic_write(&backup_path(path), contents.as_bytes())?;
         Ok(())
-    }
-}
-
-fn desktop_model_slug(model: &str) -> String {
-    let Some(model_name) = model.strip_prefix("gpt-") else {
-        return model.to_owned();
-    };
-    let version = model_name.strip_suffix("-sol").unwrap_or(model_name);
-    if version
-        .chars()
-        .all(|character| character.is_ascii_digit() || character == '.')
-    {
-        format!("gpt-{}-thinking", version.replace('.', "-"))
-    } else {
-        model.to_owned()
-    }
-}
-
-fn desktop_thinking_effort(effort: &str) -> &str {
-    match effort {
-        "medium" => "standard",
-        "high" => "extended",
-        effort => effort,
     }
 }
 
@@ -254,35 +172,6 @@ mod tests {
             42
         );
         assert_eq!(value["projectless-thread-ids"][1], "def");
-    }
-
-    #[test]
-    fn parses_last_selected_model() {
-        let state: CodexGlobalState = serde_json::from_str(
-            r#"{
-                "electron-persisted-atom-state": {
-                    "chatgpt-last-selected-model-v1": {
-                        "slug": "gpt-5-6-thinking",
-                        "thinkingEffort": "extended",
-                        "versionId": "latest"
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let selection = state.last_selected_model().unwrap();
-        assert_eq!(selection.slug, "gpt-5-6-thinking");
-        assert_eq!(selection.thinking_effort.as_deref(), Some("extended"));
-    }
-
-    #[test]
-    fn maps_codex_model_settings_to_desktop_values() {
-        assert_eq!(desktop_model_slug("gpt-5.6-sol"), "gpt-5-6-thinking");
-        assert_eq!(desktop_model_slug("gpt-5.5"), "gpt-5-5-thinking");
-        assert_eq!(desktop_model_slug("custom-model"), "custom-model");
-        assert_eq!(desktop_thinking_effort("medium"), "standard");
-        assert_eq!(desktop_thinking_effort("high"), "extended");
-        assert_eq!(desktop_thinking_effort("xhigh"), "xhigh");
     }
 
     #[test]

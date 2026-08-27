@@ -8,8 +8,11 @@ impl CodexGui {
     pub(super) fn load_startup_data(&self, cx: &mut Context<Self>) {
         let bridge = self.bridge.clone();
         cx.spawn(async move |this, cx| {
-            let result = bridge.list_models().await;
-            let _ = this.update(cx, |view, cx| view.apply_models_result(result, cx));
+            let models_result = bridge.list_models().await;
+            let settings_result = bridge.read_chat_settings().await;
+            let _ = this.update(cx, |view, cx| {
+                view.apply_models_result(models_result, settings_result, cx)
+            });
         })
         .detach();
 

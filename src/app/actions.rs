@@ -4,10 +4,7 @@ use super::{
     CodexGui, PendingThread,
     thread_mapping::{empty_chat_entity, project_name_from_path, should_start_thread_for_turn},
 };
-use crate::{
-    global_state::CodexGlobalState,
-    gui::{ApprovalReviewerMode, ChatState, ProjectState, single_line_title},
-};
+use crate::gui::{ApprovalsReviewer, ChatState, ProjectState, single_line_title};
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use codex_app_server_protocol::RequestId;
@@ -499,7 +496,7 @@ impl CodexGui {
             state.set_model(model);
             cx.notify();
         });
-        self.persist_model_settings(cx);
+        self.persist_chat_settings(cx);
         self.sync_active_thread_settings(cx);
     }
 
@@ -508,7 +505,7 @@ impl CodexGui {
             state.set_effort(effort);
             cx.notify();
         });
-        self.persist_model_settings(cx);
+        self.persist_chat_settings(cx);
         self.sync_active_thread_settings(cx);
     }
 
@@ -526,13 +523,14 @@ impl CodexGui {
 
     pub(crate) fn set_approvals_reviewer(
         &mut self,
-        approvals_reviewer: ApprovalReviewerMode,
+        approvals_reviewer: ApprovalsReviewer,
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
             state.set_approvals_reviewer(approvals_reviewer);
             cx.notify();
         });
+        self.persist_chat_settings(cx);
         self.sync_active_thread_settings(cx);
     }
 
@@ -687,13 +685,14 @@ impl CodexGui {
         .detach();
     }
 
-    fn persist_model_settings(&mut self, cx: &mut Context<Self>) {
+    fn persist_chat_settings(&mut self, cx: &mut Context<Self>) {
         let settings = self.state.read(cx).chat_settings.clone();
-        if let Err(error) =
-            CodexGlobalState::update_last_selected_model(&settings.model, &settings.effort)
-        {
-            self.apply_bridge_error(format!("failed to persist model settings: {error}"), cx);
-        }
+        let bridge = self.bridge.clone();
+        cx.spawn(async move |this, cx| {
+            let result = bridge.write_chat_settings(settings).await;
+            let _ = this.update(cx, |view, cx| view.apply_unit_result(result, cx));
+        })
+        .detach();
     }
 }
 
