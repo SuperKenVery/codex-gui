@@ -71,6 +71,7 @@ pub struct TextView {
     selection_format: SelectionFormat,
     scrollable: bool,
     content_max_width: Option<DefiniteLength>,
+    scroll_bottom_padding: Option<DefiniteLength>,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
@@ -113,6 +114,7 @@ impl TextView {
             selection_format: SelectionFormat::default(),
             scrollable: false,
             content_max_width: None,
+            scroll_bottom_padding: None,
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -132,6 +134,7 @@ impl TextView {
             selection_format: SelectionFormat::default(),
             scrollable: false,
             content_max_width: None,
+            scroll_bottom_padding: None,
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -151,6 +154,7 @@ impl TextView {
             selection_format: SelectionFormat::default(),
             scrollable: false,
             content_max_width: None,
+            scroll_bottom_padding: None,
             code_block_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -203,6 +207,15 @@ impl TextView {
     /// constrained.
     pub fn content_max_width(mut self, width: impl Into<DefiniteLength>) -> Self {
         self.content_max_width = Some(width.into());
+        self
+    }
+
+    /// Add blank scrollable space after the document's final block.
+    ///
+    /// This only affects scrollable text views. The padding participates in
+    /// the list's scroll range and tail-following behavior.
+    pub fn scroll_bottom_padding(mut self, padding: impl Into<DefiniteLength>) -> Self {
+        self.scroll_bottom_padding = Some(padding.into());
         self
     }
 
@@ -351,6 +364,7 @@ impl Element for TextView {
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
+            state.scroll_bottom_padding = self.scroll_bottom_padding;
             if state.content_max_width != self.content_max_width {
                 state.content_max_width = self.content_max_width;
                 state

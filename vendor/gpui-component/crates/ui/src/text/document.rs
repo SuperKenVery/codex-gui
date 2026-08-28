@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, DefiniteLength, InteractiveElement as _, IntoElement, ListState,
-    ParentElement as _, SharedString, Styled as _, Window, div,
+    ParentElement as _, SharedString, Styled as _, Window, div, prelude::*
 };
 
 use std::{ops::RangeInclusive, sync::Arc};
@@ -192,6 +192,7 @@ impl ParsedDocument {
         &self,
         list_state: Option<ListState>,
         content_max_width: Option<DefiniteLength>,
+        scroll_bottom_padding: Option<DefiniteLength>,
         node_cx: &NodeContext,
         window: &mut Window,
         cx: &mut App,
@@ -252,7 +253,8 @@ impl ParsedDocument {
                     )
                 }
             })
-            .size_full(),
+            .size_full()
+            .when_some(scroll_bottom_padding, |list, padding| list.pb(padding)),
         )
     }
 }

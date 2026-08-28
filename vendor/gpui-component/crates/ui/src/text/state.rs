@@ -84,6 +84,7 @@ pub struct TextViewState {
     pub(super) selection_format: SelectionFormat,
     pub(super) scrollable: bool,
     pub(super) content_max_width: Option<DefiniteLength>,
+    pub(super) scroll_bottom_padding: Option<DefiniteLength>,
     pub(super) text_view_style: TextViewStyle,
     pub(super) code_block_actions: Option<std::sync::Arc<CodeBlockActionsFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
@@ -184,6 +185,7 @@ impl TextViewState {
             selection_format: SelectionFormat::default(),
             scrollable: false,
             content_max_width: None,
+            scroll_bottom_padding: None,
             // Measure all blocks (not just visible ones) so the scrollbar
             // thumb size stays stable. Without this, off-screen blocks count
             // as zero height until scrolled into view, which makes the
@@ -694,6 +696,7 @@ impl Render for TextViewState {
                         None
                     },
                     self.content_max_width,
+                    self.scroll_bottom_padding,
                     &node_cx,
                     window,
                     cx,
