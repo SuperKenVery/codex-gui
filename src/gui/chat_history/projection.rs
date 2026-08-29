@@ -229,7 +229,7 @@ fn append_items(
                     chat_source,
                     &items[index],
                     &tools,
-                    tools_end == items.len(),
+                    tool_group_is_tail(items, index + 1, tools_end),
                     expanded_tool_groups,
                 );
                 index = tools_end;
@@ -368,8 +368,7 @@ fn append_items(
                     chat_source,
                     item.id(),
                     &tools,
-                    tools_end == items.len()
-                        && !tools_done(&tools, |id| chat.item_is_streaming(id)),
+                    tool_group_is_tail(items, index, tools_end),
                     expanded_tool_groups,
                 );
                 index = tools_end;
@@ -385,7 +384,7 @@ fn append_agent(
     chat_source: &WeakEntity<ChatState>,
     item: &ThreadItem,
     tools: &[&ThreadItem],
-    tool_group_at_tail: bool,
+    tail: bool,
     expanded_tool_groups: &HashSet<String>,
 ) {
     let ThreadItem::AgentMessage {
@@ -419,7 +418,7 @@ fn append_agent(
             chat_source,
             id,
             tools,
-            tool_group_at_tail && !tools_done(tools, |id| chat.item_is_streaming(id)),
+            tail,
             expanded_tool_groups,
         );
     }
@@ -431,7 +430,7 @@ fn append_tool_group(
     chat_source: &WeakEntity<ChatState>,
     key: &str,
     tools: &[&ThreadItem],
-    active_tail: bool,
+    tail: bool,
     expanded_tool_groups: &HashSet<String>,
 ) {
     let block_id = super::blocks::BlockId::tool_group(key);
@@ -442,7 +441,7 @@ fn append_tool_group(
         }),
         expanded: expanded_tool_groups.contains(key),
         collapsible: true,
-        active_tail,
+        tail,
     });
     for tool in tools {
         transcript.map_layout_target(
@@ -472,19 +471,36 @@ fn tool_group_end(
     end
 }
 
+fn tool_group_is_tail(items: &[ThreadItem], start: usize, end: usize) -> bool {
+    let Some(last_tool_index) = (start..end)
+        .rev()
+        .find(|index| is_tool_item(&items[*index]))
+    else {
+        return false;
+    };
+
+    match &items[last_tool_index + 1..] {
+        [] => true,
+        [item] => is_empty_reasoning(item),
+        _ => false,
+    }
+}
+
 fn is_completed_empty_reasoning(item: &ThreadItem, is_streaming: &impl Fn(&str) -> bool) -> bool {
+    !is_streaming(item.id()) && is_empty_reasoning(item)
+}
+
+fn is_empty_reasoning(item: &ThreadItem) -> bool {
     let ThreadItem::Reasoning {
-        id,
         summary,
         content,
+        ..
     } = item
     else {
         return false;
     };
 
-    !is_streaming(id)
-        && summary.iter().all(String::is_empty)
-        && content.iter().all(String::is_empty)
+    summary.iter().all(String::is_empty) && content.iter().all(String::is_empty)
 }
 
 struct TurnFold {
@@ -626,6 +642,53 @@ mod tests {
         ];
 
         assert_eq!(tool_group_end(&items, 0, |id| id == "reasoning-1"), 1);
+    }
+
+    #[test]
+    fn last_tool_group_is_tail() {
+        let items = vec![sleep_tool("tool-1")];
+        let end = tool_group_end(&items, 0, |_| false);
+
+        assert!(tool_group_is_tail(&items, 0, end));
+    }
+
+    #[test]
+    fn tool_group_before_one_empty_reasoning_is_tail() {
+        let items = vec![sleep_tool("tool-1"), reasoning("reasoning-1", "")];
+        let end = tool_group_end(&items, 0, |_| false);
+
+        assert!(tool_group_is_tail(&items, 0, end));
+    }
+
+    #[test]
+    fn tool_group_before_streaming_empty_reasoning_is_tail() {
+        let items = vec![sleep_tool("tool-1"), reasoning("reasoning-1", "")];
+        let end = tool_group_end(&items, 0, |id| id == "reasoning-1");
+
+        assert!(tool_group_is_tail(&items, 0, end));
+    }
+
+    #[test]
+    fn tool_group_before_other_content_is_not_tail() {
+        let items = vec![
+            sleep_tool("tool-1"),
+            reasoning("reasoning-1", "Still investigating"),
+        ];
+        let end = tool_group_end(&items, 0, |_| false);
+
+        assert!(!tool_group_is_tail(&items, 0, end));
+    }
+
+    #[test]
+    fn tool_group_before_two_empty_reasoning_items_is_not_tail() {
+        let items = vec![
+            sleep_tool("tool-1"),
+            reasoning("reasoning-1", ""),
+            reasoning("reasoning-2", ""),
+        ];
+        let end = tool_group_end(&items, 0, |_| false);
+
+        assert!(!tool_group_is_tail(&items, 0, end));
     }
 
     fn sleep_tool(id: &str) -> ThreadItem {

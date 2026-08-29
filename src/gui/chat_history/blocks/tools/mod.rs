@@ -112,7 +112,7 @@ pub(super) fn render_group(
     key: &str,
     tools: &[ToolCall],
     collapsible: bool,
-    active_tail: bool,
+    tail: bool,
     expanded: bool,
     theme: &Theme,
     on_toggle: impl Fn(&mut App) + Send + Sync + 'static,
@@ -121,7 +121,7 @@ pub(super) fn render_group(
         return div();
     }
 
-    let can_toggle = collapsible && !active_tail;
+    let can_toggle = collapsible && !tail;
     let open = !can_toggle || expanded;
     let title_style = gpui::StyleRefinement::default().px_3().py_2();
     let content_style = gpui::StyleRefinement::default().px_2().pb_2();

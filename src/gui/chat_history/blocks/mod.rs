@@ -107,7 +107,7 @@ pub(super) enum HistoryBlock {
         tools: Arc<[ToolCall]>,
         expanded: bool,
         collapsible: bool,
-        active_tail: bool,
+        tail: bool,
     },
     WorkedSummary {
         turn_id: String,
@@ -275,7 +275,7 @@ pub(super) fn render(
             tools,
             expanded,
             collapsible,
-            active_tail,
+            tail,
         } => {
             let history = history.clone();
             let toggle_key = key.clone();
@@ -283,7 +283,7 @@ pub(super) fn render(
                 &key,
                 &tools,
                 collapsible,
-                active_tail,
+                tail,
                 expanded,
                 cx.theme(),
                 move |cx| {
