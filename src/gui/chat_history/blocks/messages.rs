@@ -3,7 +3,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use gpui_component::{
-    ElementExt as _, Sizable as _,
+    Sizable as _,
     button::{Button, ButtonVariants as _},
     spinner::Spinner,
     theme::Theme,
@@ -46,10 +46,12 @@ pub(super) fn render_user(
     } else {
         delivery
     };
-    let bubble = render_user_bubble(body, theme)
-        .when_some(animation_target.clone(), |bubble, target| {
-            bubble.on_prepaint(move |bounds, _, _| target.report(bounds))
-        });
+    let bubble = match &animation_target {
+        Some(target) => target
+            .observe(render_user_bubble(body, theme).opacity(0.))
+            .into_any_element(),
+        None => render_user_bubble(body, theme).into_any_element(),
+    };
 
     let row = div()
         .w_full()
@@ -66,7 +68,6 @@ pub(super) fn render_user(
                 .flex()
                 .flex_col()
                 .items_end()
-                .when(animating, |content| content.opacity(0.))
                 .child(bubble)
                 .child(
                     div()

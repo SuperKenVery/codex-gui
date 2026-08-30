@@ -6,13 +6,17 @@ use std::{
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Point, Style, Window,
-    anchored, point, px, relative, size,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Point, Style, Window, point, px, relative,
+    size,
 };
 use gpui_component::animation::ease_in_out_cubic;
+use tracing::debug;
+
+use super::{BoundsReporter, WindowPositioned};
 
 const SEND_ANIMATION_DURATION: Duration = Duration::from_millis(360);
-pub(super) const SEND_DESTINATION_TIMEOUT: Duration = Duration::from_millis(750);
+pub(in crate::gui::chat_history) const SEND_DESTINATION_TIMEOUT: Duration =
+    Duration::from_millis(750);
 
 const BUBBLE_PADDING_X: Pixels = px(12.);
 const BUBBLE_PADDING_Y: Pixels = px(8.);
@@ -20,14 +24,17 @@ const BUBBLE_PADDING_Y: Pixels = px(8.);
 /// The handoff from the composer to the user-message element. All frame-by-frame
 /// animation state lives in `AnimatedUserMessageState` once the row appears.
 #[derive(Clone)]
-pub(super) struct SendAnimationLaunch {
-    pub(super) client_id: String,
+pub(in crate::gui::chat_history) struct SendAnimationLaunch {
+    pub(in crate::gui::chat_history) client_id: String,
     source: Point<Pixels>,
     started: Rc<Cell<bool>>,
 }
 
 impl SendAnimationLaunch {
-    pub(super) fn new(client_id: String, source_bounds: Bounds<Pixels>) -> Self {
+    pub(in crate::gui::chat_history) fn new(
+        client_id: String,
+        source_bounds: Bounds<Pixels>,
+    ) -> Self {
         // The textarea reports the text origin. Offset the bubble by its padding
         // so the flying copy's glyphs initially cover the composer glyphs.
         let source = point(
@@ -41,7 +48,7 @@ impl SendAnimationLaunch {
         }
     }
 
-    pub(super) fn is_waiting(&self) -> bool {
+    pub(in crate::gui::chat_history) fn is_waiting(&self) -> bool {
         !self.started.get()
     }
 
@@ -53,10 +60,21 @@ impl SendAnimationLaunch {
 /// Receives the bubble's window-space origin while the complete, invisible row
 /// is prepainted. The animation element reads it later in the same prepaint.
 #[derive(Clone, Default)]
-pub(super) struct UserMessageTarget(Rc<Cell<Option<Point<Pixels>>>>);
+pub(in crate::gui::chat_history) struct UserMessageTarget(Rc<Cell<Option<Point<Pixels>>>>);
 
 impl UserMessageTarget {
-    pub(super) fn report(&self, bounds: Bounds<Pixels>) {
+    pub(in crate::gui::chat_history) fn observe(
+        &self,
+        child: impl IntoElement,
+    ) -> impl IntoElement {
+        let target = self.clone();
+        BoundsReporter::new(child, move |bounds, _, _| {
+            debug!("Updating animation target bounds: {:?}", bounds);
+            target.report(bounds);
+        })
+    }
+
+    fn report(&self, bounds: Bounds<Pixels>) {
         self.0.set(Some(bounds.origin));
     }
 
@@ -65,6 +83,7 @@ impl UserMessageTarget {
     }
 }
 
+/// Cross-frame state for [`AnimatedUserMessage`]
 #[derive(Clone, Copy, Default)]
 struct AnimatedUserMessageState {
     natural_height: Option<Pixels>,
@@ -76,7 +95,7 @@ struct AnimatedUserMessageState {
 /// Owns the complete send transition once its matching history row exists:
 /// intrinsic measurement, animated list height, target tracking, flying overlay,
 /// frame scheduling, and completion.
-pub(super) struct AnimatedUserMessage {
+pub(in crate::gui::chat_history) struct AnimatedUserMessage {
     id: ElementId,
     launch: SendAnimationLaunch,
     target: UserMessageTarget,
@@ -86,7 +105,7 @@ pub(super) struct AnimatedUserMessage {
 }
 
 impl AnimatedUserMessage {
-    pub(super) fn new(
+    pub(in crate::gui::chat_history) fn new(
         id: impl Into<ElementId>,
         launch: SendAnimationLaunch,
         target: UserMessageTarget,
@@ -125,6 +144,9 @@ impl Element for AnimatedUserMessage {
         None
     }
 
+    // We mainly
+    // 1. Calculate the animation progress and target flying bubble position
+    // 2. Animate the element height in chat history, to push other history rows upwards
     fn request_layout(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -146,16 +168,19 @@ impl Element for AnimatedUserMessage {
                 sample_animation(self.launch.source, target, started_at, Instant::now())
             });
         let (progress, overlay_origin) = sample.map_or((0., self.launch.source), |sample| {
-            (sample.progress, sample.origin)
+            debug!(
+                "Animation progress: {}, flying bubble position: {:?}",
+                sample.progress, sample.current_position
+            );
+            (sample.progress, sample.current_position)
         });
-        let mut overlay = anchored()
-            .position(overlay_origin)
-            .child(
-                self.overlay
-                    .take()
-                    .expect("AnimatedUserMessage overlay must exist during layout"),
-            )
-            .into_any_element();
+        let overlay = BoundsReporter::new(
+            self.overlay
+                .take()
+                .expect("AnimatedUserMessage overlay must exist during layout"),
+            |bounds, _, _| debug!("Actual flying bubble bounds: {:?}", bounds),
+        );
+        let mut overlay = WindowPositioned::new(overlay_origin, overlay).into_any_element();
         let overlay_layout_id = overlay.request_layout(window, cx);
         self.overlay = Some(overlay);
 
@@ -173,6 +198,7 @@ impl Element for AnimatedUserMessage {
         )
     }
 
+    // Here we've done measuring, so we update the animation target position
     fn prepaint(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -197,11 +223,10 @@ impl Element for AnimatedUserMessage {
 
         let now = Instant::now();
         let current_target = self.target.get();
-        let (state, measurement_changed) = window.with_element_state(
+        let state = window.with_element_state(
             global_id.expect("AnimatedUserMessage must have an id"),
             |state: Option<AnimatedUserMessageState>, _| {
                 let mut state = state.unwrap_or_default();
-                let measurement_changed = state.natural_height != Some(measured.height);
                 state.natural_height = Some(measured.height);
                 if let Some(target) = current_target {
                     state.target = Some(target);
@@ -209,15 +234,12 @@ impl Element for AnimatedUserMessage {
                 if state.started_at.is_none() && state.target.is_some() {
                     state.started_at = Some(now);
                 }
-                ((state, measurement_changed), state)
+                (state, state)
             },
         );
 
         if state.started_at.is_some() {
             self.launch.mark_started();
-        }
-        if measurement_changed {
-            window.request_animation_frame();
         }
 
         let (Some(target), Some(started_at), Some(overlay)) =
@@ -264,7 +286,8 @@ impl Element for AnimatedUserMessage {
 }
 
 struct SendAnimationSample {
-    origin: Point<Pixels>,
+    /// Where the overlay's origin should be for current frame
+    current_position: Point<Pixels>,
     progress: f32,
     complete: bool,
 }
@@ -280,7 +303,7 @@ fn sample_animation(
     .clamp(0., 1.);
     let progress = ease_in_out_cubic(linear);
     SendAnimationSample {
-        origin: cubic_flight(source, target, progress),
+        current_position: cubic_flight(source, target, progress),
         progress,
         complete: linear >= 1.,
     }
@@ -296,8 +319,8 @@ fn cubic_flight(start: Point<Pixels>, end: Point<Pixels>, progress: f32) -> Poin
 
     // Leave the composer mostly vertically, then bend into the right-aligned
     // destination. This also behaves sensibly for resized or narrow windows.
-    let control_1 = (start_x + dx * 0.08, start_y + dy * 0.42);
-    let control_2 = (end_x - dx * 0.32, end_y - dy * 0.08);
+    let control_1 = (start_x + dx * 0.7, start_y + dy * 0.08);
+    let control_2 = (end_x - dx * 0.08, end_y - dy * 0.5);
     point(
         px(cubic_axis(
             start_x,
