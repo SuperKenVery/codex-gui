@@ -22,7 +22,7 @@ use crate::{
     text::{
         CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, MarkdownNode,
         document::NodeRenderOptions,
-        inline::{Inline, InlineState},
+        inline::{Inline, InlineState, TextFade},
         inline_flow::{InlineFlow, InlineFlowItem},
         text_view::handle_link_click,
     },
@@ -412,6 +412,75 @@ impl BlockNode {
             | BlockNode::HorizontalRule { .. }
             | BlockNode::Unknown { .. } => {}
         }
+    }
+
+    pub(super) fn apply_text_fades(&self, fades: &[TextFade]) {
+        let mut cursor = 0;
+        self.apply_text_fades_at(fades, &mut cursor);
+    }
+
+    fn apply_text_fades_at(&self, fades: &[TextFade], cursor: &mut usize) {
+        let start = *cursor;
+        match self {
+            BlockNode::Root { children, .. }
+            | BlockNode::Blockquote { children, .. }
+            | BlockNode::List { children, .. }
+            | BlockNode::ListItem { children, .. } => {
+                for child in children {
+                    child.apply_text_fades_at(fades, cursor);
+                }
+            }
+            BlockNode::VirtualListItem { child, .. } => {
+                child.apply_text_fades_at(fades, cursor);
+            }
+            BlockNode::Paragraph(paragraph) => paragraph.apply_text_fades(fades, cursor),
+            BlockNode::Heading { children, .. } => children.apply_text_fades(fades, cursor),
+            BlockNode::Table(table) => {
+                for row in &table.children {
+                    for (cell_ix, cell) in row.children.iter().enumerate() {
+                        if cell_ix > 0 {
+                            *cursor += 1;
+                        }
+                        cell.children.apply_text_fades(fades, cursor);
+                    }
+                    *cursor += 1;
+                }
+                if !table.children.is_empty() {
+                    *cursor += 1;
+                }
+            }
+            BlockNode::CodeBlock(code_block) => {
+                let len = code_block.code().len();
+                set_state_fades(&code_block.state, *cursor, len, fades);
+                *cursor += len;
+            }
+            BlockNode::Custom { .. }
+            | BlockNode::Definition { .. }
+            | BlockNode::Break { .. }
+            | BlockNode::HorizontalRule { .. }
+            | BlockNode::Unknown { .. } => {}
+        }
+
+        // Keep the cursor exactly aligned with `text()`, including structural
+        // separators that do not belong to any rendered inline.
+        *cursor = start + self.text().len();
+    }
+}
+
+fn set_state_fades(state: &Arc<Mutex<InlineState>>, start: usize, len: usize, fades: &[TextFade]) {
+    let end = start + len;
+    let local_fades = fades
+        .iter()
+        .filter_map(|fade| {
+            let overlap_start = fade.range.start.max(start);
+            let overlap_end = fade.range.end.min(end);
+            (overlap_start < overlap_end).then(|| {
+                fade.with_range((overlap_start - start)..(overlap_end - start))
+            })
+        })
+        .collect();
+    if let Ok(mut state) = state.lock() {
+        state.fades = local_fades;
     }
 }
 
@@ -989,6 +1058,34 @@ impl Paragraph {
             text.push_str(&node.text);
         }
         text
+    }
+
+    fn apply_text_fades(&self, fades: &[TextFade], cursor: &mut usize) {
+        if let Ok(mut state) = self.state.lock() {
+            state.fades.clear();
+        }
+        for child in &self.children {
+            if let Ok(mut state) = child.state.lock() {
+                state.fades.clear();
+            }
+        }
+
+        let mut run_len = 0;
+        for child in &self.children {
+            if child.image.is_some() {
+                if run_len > 0 {
+                    set_state_fades(&child.state, *cursor, run_len, fades);
+                    *cursor += run_len;
+                    run_len = 0;
+                }
+            } else {
+                run_len += child.text.len();
+            }
+        }
+        if run_len > 0 {
+            set_state_fades(&self.state, *cursor, run_len, fades);
+            *cursor += run_len;
+        }
     }
 
     /// Synchronously clear the selection stored in every inline state.

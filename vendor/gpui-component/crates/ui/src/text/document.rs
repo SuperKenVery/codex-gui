@@ -7,6 +7,7 @@ use std::{ops::RangeInclusive, sync::Arc};
 
 use crate::text::{
     SelectionFormat,
+    inline::TextFade,
     node::{BlockNode, NodeContext},
 };
 
@@ -173,6 +174,12 @@ impl ParsedDocument {
     pub(super) fn clear_selection(&self) {
         for block in self.blocks.iter() {
             block.clear_selection();
+        }
+    }
+
+    pub(super) fn apply_text_fades_by_block(&self, fades: &[Vec<TextFade>]) {
+        for (ix, block) in self.blocks.iter().enumerate() {
+            block.apply_text_fades(fades.get(ix).map(Vec::as_slice).unwrap_or_default());
         }
     }
 

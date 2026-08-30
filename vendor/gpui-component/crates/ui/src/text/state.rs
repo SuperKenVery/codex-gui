@@ -4,6 +4,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::Poll,
+    time::{Duration, Instant},
 };
 
 use gpui::{
@@ -21,6 +22,7 @@ use crate::{
         CodeBlockActionsFn, LinkClickHandlerFn, MarkdownExtensions, TextViewStyle,
         document::ParsedDocument,
         format,
+        inline::TextFade,
         node::{self, NodeContext},
         selection_adapter::TextViewSelectionAdapter,
     },
@@ -105,6 +107,8 @@ pub struct TextViewState {
     revision: usize,
     pub(super) selection_revision: usize,
     compatible_layout_update: bool,
+    append_fade_duration: Option<Duration>,
+    append_fades: Vec<Vec<TextFade>>,
     parsed_error: Option<SharedString>,
     tx: Sender<UpdateOptions>,
     _parse_task: Task<()>,
@@ -143,6 +147,22 @@ impl TextViewState {
 
                         match parsed_update.result {
                             Ok(content) => {
+                                if parsed_update.selection_compatible {
+                                    let previous_document = state.parsed_content.document.clone();
+                                    state.update_append_fades(
+                                        &previous_document,
+                                        &content.document,
+                                        parsed_update.preserved_block_count.unwrap_or(0),
+                                        Instant::now(),
+                                        cx.reduce_motion(),
+                                    );
+                                } else {
+                                    state.append_fades.clear();
+                                }
+                                content
+                                    .document
+                                    .apply_text_fades_by_block(&state.append_fades);
+
                                 if let Some(layout_splice) = parsed_update.layout_splice {
                                     state.splice_layout(layout_splice);
                                 } else if let Some(preserved_block_count) =
@@ -205,6 +225,8 @@ impl TextViewState {
             revision: 0,
             selection_revision: 0,
             compatible_layout_update: false,
+            append_fade_duration: None,
+            append_fades: Vec::new(),
             tx,
             _parse_task,
             _receive_task,
@@ -304,6 +326,22 @@ impl TextViewState {
         true
     }
 
+    /// Fade text introduced by append updates from transparent to opaque.
+    ///
+    /// This is paint-only: it does not change parsing, wrapping, selection, or
+    /// cached block measurements. Pass `None` to disable the effect.
+    pub fn set_append_fade_duration(&mut self, duration: Option<Duration>, cx: &mut Context<Self>) {
+        if self.append_fade_duration == duration {
+            return;
+        }
+        self.append_fade_duration = duration;
+        if duration.is_none() {
+            self.append_fades.clear();
+            self.parsed_content.document.apply_text_fades_by_block(&[]);
+        }
+        cx.notify();
+    }
+
     /// Set the text content.
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.set_text_inner(text, false, cx);
@@ -331,6 +369,8 @@ impl TextViewState {
 
         self.text.clear();
         self.text.push_str(text);
+        self.append_fades.clear();
+        self.parsed_content.document.apply_text_fades_by_block(&[]);
         self.parsed_error = None;
         self.increment_update(text, false, preserve_layout, cx);
     }
@@ -481,6 +521,64 @@ impl TextViewState {
     /// append. Replacing the whole `ListState` here used to make `measure_all`
     /// lay out every custom block again whenever an append added a top-level
     /// block, which is especially expensive for transcript plugins.
+    fn update_append_fades(
+        &mut self,
+        previous: &ParsedDocument,
+        next: &ParsedDocument,
+        preserved_block_count: usize,
+        now: Instant,
+        reduce_motion: bool,
+    ) {
+        let Some(duration) = self.append_fade_duration else {
+            self.append_fades.clear();
+            return;
+        };
+        if duration.is_zero() || reduce_motion {
+            self.append_fades.clear();
+            return;
+        }
+
+        let mut next_fades = vec![Vec::new(); next.blocks.len()];
+        let preserved_block_count = preserved_block_count.min(next.blocks.len());
+
+        // For unchanged blocks, carry over their animations which are still valid.
+        for (ix, block) in next.blocks.iter().take(preserved_block_count).enumerate() {
+            let visible_end = block.text().trim_end_matches('\n').len();
+            inherit_active_fades(
+                &mut next_fades[ix],
+                self.append_fades.get(ix).map(Vec::as_slice),
+                visible_end,
+                now,
+            );
+        }
+
+        // The reparsed suffix can contain several old or newly created blocks.
+        // Preserve each block's stable rendered prefix, then animate its new suffix.
+        for (ix, next_block) in next.blocks.iter().enumerate().skip(preserved_block_count) {
+            let next_text = next_block.text();
+            let visible_end = next_text.trim_end_matches('\n').len();
+            let stable_prefix = previous
+                .blocks
+                .get(ix)
+                .map(|previous_block| common_prefix_len(&previous_block.text(), &next_text))
+                .unwrap_or(0)
+                .min(visible_end);
+
+            inherit_active_fades(
+                &mut next_fades[ix],
+                self.append_fades.get(ix).map(Vec::as_slice),
+                stable_prefix,
+                now,
+            );
+
+            if stable_prefix < visible_end {
+                next_fades[ix].push(TextFade::new(stable_prefix..visible_end, duration));
+            }
+        }
+
+        self.append_fades = next_fades;
+    }
+
     fn splice_compatible_layout(&mut self, preserved_block_count: usize, new_len: usize) {
         let old_len = self.list_state.item_count();
         let preserved_block_count = preserved_block_count.min(old_len).min(new_len);
@@ -741,6 +839,40 @@ impl Render for TextViewState {
                 }
             })
     }
+}
+
+fn inherit_active_fades(
+    target: &mut Vec<TextFade>,
+    existing: Option<&[TextFade]>,
+    stable_prefix: usize,
+    now: Instant,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+
+    target.extend(existing.iter().filter_map(|fade| {
+        let end = fade.range.end.min(stable_prefix);
+
+        if fade.range.start < end && !fade.is_complete_at(now) {
+            Some(fade.with_range(fade.range.start..end))
+        }else {
+            None
+        }
+    }));
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    let mut len = left
+        .as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    while !right.is_char_boundary(len) {
+        len -= 1;
+    }
+    len
 }
 
 #[derive(Clone, PartialEq, Default)]

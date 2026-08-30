@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use codex_app_server_protocol::RequestId;
@@ -371,6 +372,7 @@ fn new_transcript(cx: &mut Context<ChatHistory>) -> Entity<TextViewState> {
     cx.new(|cx| {
         let mut state = TextViewState::markdown("", cx);
         state.set_follow_mode(FollowMode::Tail, cx);
+        state.set_append_fade_duration(Some(Duration::from_millis(200)), cx);
         state
     })
 }

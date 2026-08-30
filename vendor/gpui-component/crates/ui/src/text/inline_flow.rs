@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    inline::{Inline, InlineState},
+    inline::{Inline, InlineState, TextFade},
     node::LinkMark,
     utils::image_source,
 };
@@ -272,16 +272,34 @@ impl Element for InlineFlow {
                     highlights,
                     ..
                 } => {
-                    let state = match &self.items[item_ix] {
+                    let (state, fades) = match &self.items[item_ix] {
                         InlineFlowItem::Text {
                             state,
                             text: source,
                             ..
-                        } if source_range == (0..source.len()) => state.clone(),
-                        _ => Arc::new(Mutex::new(InlineState::default())),
+                        } => {
+                            let fades = state
+                                .lock()
+                                .map(|state| {
+                                    slice_text_fades(
+                                        &state.fades,
+                                        source_range.start,
+                                        source_range.end,
+                                    )
+                                })
+                                .unwrap_or_default();
+                            let fragment_state = if source_range == (0..source.len()) {
+                                state.clone()
+                            } else {
+                                Arc::new(Mutex::new(InlineState::default()))
+                            };
+                            (fragment_state, fades)
+                        }
+                        _ => (Arc::new(Mutex::new(InlineState::default())), Vec::new()),
                     };
                     if let Ok(mut state) = state.lock() {
                         state.set_text(text);
+                        state.fades = fades;
                     }
 
                     let mut element = Inline::new(
@@ -732,6 +750,19 @@ fn shape_line(
     window: &mut Window,
 ) -> ShapedLine {
     window.text_system().shape_line(text, font_size, runs, None)
+}
+
+fn slice_text_fades(fades: &[TextFade], start: usize, end: usize) -> Vec<TextFade> {
+    fades
+        .iter()
+        .filter_map(|fade| {
+            let overlap_start = fade.range.start.max(start);
+            let overlap_end = fade.range.end.min(end);
+            (overlap_start < overlap_end).then(|| {
+                fade.with_range((overlap_start - start)..(overlap_end - start))
+            })
+        })
+        .collect()
 }
 
 fn slice_ranges<T, U>(

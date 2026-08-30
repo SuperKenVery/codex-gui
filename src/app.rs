@@ -91,7 +91,7 @@ impl Render for CodexGui {
             .size_full()
             .bg(transparent_black())
             .text_color(cx.theme().foreground)
-            .font_family(".SystemUIFont")
+            // .font_family(".SystemUIFont")
             .child(
                 div().relative().size_full().child(
                     div()
