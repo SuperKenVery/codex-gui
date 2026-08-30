@@ -15,6 +15,7 @@ pub(super) fn build_transcript(
     chat: &ChatState,
     chat_source: WeakEntity<ChatState>,
     expanded_turns: &HashSet<String>,
+    expanded_reasoning_blocks: &HashSet<String>,
     expanded_tool_groups: &HashSet<String>,
 ) -> TranscriptSnapshot {
     let mut transcript = TranscriptSnapshot::new();
@@ -29,6 +30,7 @@ pub(super) fn build_transcript(
                 turn,
                 previous_turn_id.as_deref(),
                 expanded_turns,
+                expanded_reasoning_blocks,
                 expanded_tool_groups,
             );
             if !turn
@@ -129,6 +131,7 @@ fn append_turn(
     turn: &Turn,
     previous_turn_id: Option<&str>,
     expanded_turns: &HashSet<String>,
+    expanded_reasoning_blocks: &HashSet<String>,
     expanded_tool_groups: &HashSet<String>,
 ) {
     let Some(fold) = completed_turn_fold(turn) else {
@@ -139,6 +142,7 @@ fn append_turn(
             &turn.id,
             previous_turn_id,
             &turn.items,
+            expanded_reasoning_blocks,
             expanded_tool_groups,
         );
         return;
@@ -151,6 +155,7 @@ fn append_turn(
         &turn.id,
         previous_turn_id,
         &turn.items[..=fold.user_index],
+        expanded_reasoning_blocks,
         expanded_tool_groups,
     );
 
@@ -169,6 +174,7 @@ fn append_turn(
             &turn.id,
             previous_turn_id,
             &turn.items[fold.user_index + 1..],
+            expanded_reasoning_blocks,
             expanded_tool_groups,
         );
     } else if let Some(final_answer) = turn.items.get(fold.final_index) {
@@ -191,6 +197,7 @@ fn append_items(
     turn_id: &str,
     previous_turn_id: Option<&str>,
     items: &[ThreadItem],
+    expanded_reasoning_blocks: &HashSet<String>,
     expanded_tool_groups: &HashSet<String>,
 ) {
     let mut index = 0;
@@ -275,6 +282,7 @@ fn append_items(
                         key: id.clone(),
                         body: body.into(),
                         running,
+                        expanded: expanded_reasoning_blocks.contains(id),
                     });
                     transcript.map_layout_target(
                         TranscriptLayoutTarget::Item(id.clone()),
@@ -492,9 +500,7 @@ fn is_completed_empty_reasoning(item: &ThreadItem, is_streaming: &impl Fn(&str) 
 
 fn is_empty_reasoning(item: &ThreadItem) -> bool {
     let ThreadItem::Reasoning {
-        summary,
-        content,
-        ..
+        summary, content, ..
     } = item
     else {
         return false;

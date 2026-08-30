@@ -21,7 +21,7 @@ use gpui::{AnyElement, App, IntoElement, SharedString, WeakEntity, Window};
 use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
 use gpui_component::ActiveTheme as _;
 
-use super::view::ChatHistory;
+use super::{motion::Appearing, view::ChatHistory};
 use crate::gui::{PendingApproval, PendingUserInputRequest};
 pub use tools::ToolGallery;
 pub(super) use tools::{ToolCall, is_tool_item, tool_calls, tools_done};
@@ -91,6 +91,7 @@ pub(super) enum HistoryBlock {
         key: String,
         body: SharedString,
         running: bool,
+        expanded: bool,
     },
     HookPrompt {
         key: String,
@@ -216,8 +217,33 @@ pub(super) fn render(
         HistoryBlock::Plan { body, running, .. } => {
             plan::render(body, running, cx.theme()).into_any_element()
         }
-        HistoryBlock::Reasoning { body, running, .. } => {
-            reasoning::render(body, running, cx.theme()).into_any_element()
+        HistoryBlock::Reasoning {
+            key,
+            body,
+            running,
+            expanded,
+        } => {
+            let toggle_history = history.clone();
+            let toggle_key = key.clone();
+            let content = reasoning::render(
+                &key,
+                body,
+                running,
+                expanded,
+                running && !cx.reduce_motion(),
+                cx.theme(),
+                move |cx| {
+                    let key = toggle_key.clone();
+                    let _ =
+                        toggle_history.update(cx, |history, cx| history.toggle_reasoning(&key, cx));
+                },
+            );
+            Appearing::new(
+                format!("reasoning-appear-{key}"),
+                content,
+                !cx.reduce_motion(),
+            )
+            .into_any_element()
         }
         HistoryBlock::HookPrompt { body, .. } => {
             context::render_hook_prompt(body, cx.theme()).into_any_element()
@@ -279,7 +305,7 @@ pub(super) fn render(
         } => {
             let history = history.clone();
             let toggle_key = key.clone();
-            tools::render_group(
+            let content = tools::render_group(
                 &key,
                 &tools,
                 collapsible,
@@ -290,6 +316,11 @@ pub(super) fn render(
                     let key = toggle_key.clone();
                     let _ = history.update(cx, |history, cx| history.toggle_tools(&key, cx));
                 },
+            );
+            Appearing::new(
+                format!("tool-group-appear-{key}"),
+                content,
+                !cx.reduce_motion(),
             )
             .into_any_element()
         }

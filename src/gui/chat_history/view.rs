@@ -31,6 +31,7 @@ pub struct ChatHistory {
     _state_subscription: Subscription,
     chat_subscription: Option<Subscription>,
     expanded_turns: HashSet<String>,
+    expanded_reasoning_blocks: HashSet<String>,
     expanded_tool_groups: HashSet<String>,
     transcript: Entity<TextViewState>,
     transcript_extensions: MarkdownExtensions,
@@ -90,6 +91,7 @@ impl ChatHistory {
             _state_subscription: state_subscription,
             chat_subscription,
             expanded_turns: HashSet::new(),
+            expanded_reasoning_blocks: HashSet::new(),
             expanded_tool_groups: HashSet::new(),
             transcript,
             transcript_extensions,
@@ -123,6 +125,7 @@ impl ChatHistory {
         self.chat_subscription = subscribe_to_chat(active_chat.as_ref(), cx);
         self.active_chat = active_chat;
         self.expanded_turns.clear();
+        self.expanded_reasoning_blocks.clear();
         self.expanded_tool_groups.clear();
         self.transcript = new_transcript(cx);
         self.transcript_markdown.clear();
@@ -189,6 +192,14 @@ impl ChatHistory {
             self.expanded_turns.insert(turn_id.to_string());
         }
         self.rebuild_transcript(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_reasoning(&mut self, item_id: &str, cx: &mut Context<Self>) {
+        if !self.expanded_reasoning_blocks.remove(item_id) {
+            self.expanded_reasoning_blocks.insert(item_id.to_string());
+        }
+        self.rebuild_transcript_remeasuring(Some(BlockId::new("reasoning", item_id)), cx);
         cx.notify();
     }
 
@@ -286,6 +297,7 @@ impl ChatHistory {
                     chat,
                     chat_source,
                     &self.expanded_turns,
+                    &self.expanded_reasoning_blocks,
                     &self.expanded_tool_groups,
                 ),
                 chat.transcript_layout_changes_since(self.transcript_layout_revision),
